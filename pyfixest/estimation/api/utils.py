@@ -1,6 +1,6 @@
-import pandas as pd
+import narwhals.stable.v1 as nw
 
-from pyfixest.utils.dev_utils import DataFrameType, _narwhals_to_pandas
+from pyfixest.utils.dev_utils import DataFrameType
 
 
 def _estimation_input_checks(
@@ -25,10 +25,10 @@ def _estimation_input_checks(
     fsplit: str | None,
     separation_check: list[str] | None = None,
 ):
+    data = nw.from_native(data, eager_or_interchange_only=True)
+
     if not isinstance(fml, str):
         raise TypeError("fml must be a string")
-    if not isinstance(data, pd.DataFrame):
-        data = _narwhals_to_pandas(data)
     if not isinstance(vcov, (str, dict, type(None))):
         raise TypeError("vcov must be a string, dictionary, or None")
     if not isinstance(fixef_rm, str):
