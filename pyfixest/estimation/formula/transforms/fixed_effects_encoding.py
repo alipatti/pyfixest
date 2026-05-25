@@ -2,10 +2,12 @@ import functools
 import itertools
 from typing import Final
 
+import narwhals.stable.v1 as nw
 import pandas as pd
 from formulaic.parser import DefaultOperatorResolver
 from formulaic.parser.types import Operator, OrderedSet
 from formulaic.utils.stateful_transforms import stateful_transform
+from narwhals.typing import IntoSeries
 
 
 @stateful_transform
@@ -21,6 +23,21 @@ def encode_fixed_effects(*args, _state=None, _metadata=None, _spec=None):
     return data.merge(_state[_encoding], on=data.columns.tolist(), how="left")[
         _encoding
     ]
+
+
+# TODO: finish this
+# TODO: type these args
+def encode_fixed_effects_narwhals(
+    *args: IntoSeries, _state=None, _metadata=None, _spec=None
+):
+    _encoding: Final[str] = "__fixed_effect_encoding__"
+
+    data = nw.concat(
+        [nw.from_native(s, series_only=True).to_frame() for s in args],
+        how="horizontal",
+    )
+
+    raise NotImplementedError
 
 
 class _FixedEffectsOperatorResolver(DefaultOperatorResolver):

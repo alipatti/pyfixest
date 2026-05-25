@@ -126,6 +126,7 @@ class FixestMulti:
         else:
             self._splitvar = None
 
+        # TODO: get rid of this
         data = _narwhals_to_pandas(data)
 
         if self._copy_data:

@@ -279,6 +279,8 @@ class Feols(ResultAccessorMixin):
 
         if self._sample_split_var is None:
             pass
+
+        # TODO: use narwhals here
         elif self._sample_split_value is _ALL_SAMPLE:
             data = data.loc[data[sample_split_var].notnull()]
         else:
