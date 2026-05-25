@@ -55,19 +55,6 @@ def _get_position_of_first_parenthesis_pair(string: str) -> tuple[int, int]:
     return position_open, position
 
 
-def _get_weights(data: pd.DataFrame, weights: str) -> pd.Series:
-    w = data[weights]
-    try:
-        w = pd.to_numeric(w, errors="raise")
-    except ValueError:
-        raise ValueError(f"The weights column '{weights}' must be numeric.")
-    if not (w.dropna() > 0.0).all():
-        raise ValueError(
-            f"The weights column '{weights}' must have only non-negative values."
-        )
-    return w
-
-
 class _MultipleEstimationType(Enum):
     # See https://lrberge.github.io/fixest/reference/stepwise.html
     sw = "sequential stepwise"

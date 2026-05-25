@@ -1,17 +1,18 @@
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Final
+from typing import Any, Final, Generic, cast
 
 import formulaic
+import narwhals as nw
 import numpy as np
 import pandas as pd
 from formulaic.parser import DefaultFormulaParser
+from narwhals.typing import IntoDataFrame, IntoDataFrameT
 
 from pyfixest.core.detect_singletons import detect_singletons
 from pyfixest.estimation.formula import FORMULAIC_FEATURE_FLAG, FORMULAIC_TRANSFORMS
 from pyfixest.estimation.formula.parse import Formula
-from pyfixest.estimation.formula.utils import _get_weights
 from pyfixest.utils.utils import capture_context
 
 
@@ -23,7 +24,7 @@ class _ModelMatrixKey:
     weights: str = "weights"
 
 
-class ModelMatrix:
+class ModelMatrix(Generic[IntoDataFrameT]):
     """
     A wrapper around formulaic.ModelMatrix for the specification of PyFixest models.
 
@@ -52,15 +53,20 @@ class ModelMatrix:
         Indices of rows that were dropped.
     """
 
+    _data: IntoDataFrameT
+
     def __init__(
         self,
-        model_matrix: formulaic.ModelMatrix,
+        model_matrix: formulaic.ModelMatrix[IntoDataFrameT],
         drop_rows: set[int],
         drop_singletons: bool = True,
         drop_intercept: bool = False,
     ) -> None:
         self._drop_intercept = drop_intercept
+
+        assert model_matrix.model_spec, "model matrix must have `.model_spec`"
         self._model_spec = model_matrix.model_spec
+
         self._collect_columns(model_matrix)
         self._collect_data(model_matrix)
         self._process(dropped_rows=drop_rows, drop_singletons=drop_singletons)
@@ -71,8 +77,12 @@ class ModelMatrix:
         try:
             result = mm
             for k in keys:
-                result = result[k]
-            return result.columns.tolist()
+                result = result[k]  # type: ignore
+
+            assert nw.dependencies.is_into_dataframe(result)
+            result = cast(IntoDataFrameT, result)
+
+            return nw.from_native(result).columns
         except KeyError:
             return None
 
@@ -146,7 +156,7 @@ class ModelMatrix:
         self._na_index = frozenset(dropped_rows)
 
     @property
-    def dependent(self) -> pd.DataFrame:
+    def dependent(self) -> IntoDataFrameT:
         """
         Get the dependent variable(s) from the model.
 
@@ -157,10 +167,10 @@ class ModelMatrix:
             of the main equation).
         """
         cols = self._dependent or []
-        return self._data[cols]
+        return nw.from_native(self._data).select(cols).to_native()
 
     @property
-    def independent(self) -> pd.DataFrame:
+    def independent(self) -> IntoDataFrameT:
         """
         Get the independent variable(s) from the model.
 
@@ -172,10 +182,10 @@ class ModelMatrix:
             effects are present.
         """
         cols = self._independent or []
-        return self._data[cols]
+        return nw.from_native(self._data).select(cols).to_native()
 
     @property
-    def fixed_effects(self) -> pd.DataFrame | None:
+    def fixed_effects(self) -> IntoDataFrameT | None:
         """
         Get the fixed effects variables from the model.
 
@@ -187,11 +197,11 @@ class ModelMatrix:
         """
         if self._fixed_effects is None:
             return None
-        else:
-            return self._data.loc[:, self._fixed_effects]
+
+        return nw.from_native(self._data).select(self._fixed_effects).to_native()
 
     @property
-    def endogenous(self) -> pd.DataFrame | None:
+    def endogenous(self) -> IntoDataFrameT | None:
         """
         Get the endogenous variable(s) for instrumental variable estimation.
 
@@ -204,11 +214,11 @@ class ModelMatrix:
         """
         if self._endogenous is None:
             return None
-        else:
-            return self._data.loc[:, self._endogenous]
+
+        return nw.from_native(self._data).select(self._endogenous).to_native()
 
     @property
-    def instruments(self) -> pd.DataFrame | None:
+    def instruments(self) -> IntoDataFrameT | None:
         """
         Get the instrumental variable(s) for IV estimation.
 
@@ -222,11 +232,11 @@ class ModelMatrix:
         """
         if self._instruments is None:
             return None
-        else:
-            return self._data.loc[:, self._instruments]
+
+        return nw.from_native(self._data).select(self._instruments).to_native()
 
     @property
-    def weights(self) -> pd.DataFrame | None:
+    def weights(self) -> IntoDataFrameT | None:
         """
         Get the observation weights for weighted estimation.
 
@@ -238,8 +248,8 @@ class ModelMatrix:
         """
         if self._weights is None:
             return None
-        else:
-            return self._data.loc[:, self._weights]
+
+        return nw.from_native(self._data).select(self._weights).to_native()
 
     @property
     def model_spec(self) -> formulaic.ModelSpec:
@@ -262,13 +272,13 @@ class ModelMatrix:
 
 def create_model_matrix(
     formula: Formula,
-    data: pd.DataFrame,
+    data: IntoDataFrameT,
     weights: str | None = None,
     drop_singletons: bool = False,
     drop_intercept: bool = False,
     ensure_full_rank: bool = True,
     context: int | Mapping[str, Any] = 0,
-) -> ModelMatrix:
+) -> ModelMatrix[IntoDataFrameT]:
     """
     Create a ModelMatrix from a formula and data.
 
@@ -310,19 +320,25 @@ def create_model_matrix(
         dropped observations.
 
     """
-    # Process input data
-    data.reset_index(drop=True, inplace=True)  # Sanitise index
-    n_observations: Final[int] = data.shape[0]
+    data = nw.from_native(data).with_row_index("__row_index__").to_native()
+    n_observations: Final[int] = nw.from_native(data).shape[0]
+
     formula_formulaic = _get_formulaic_formula(
         formula=formula, data=data, weights=weights
     )
-    model_matrix = formula_formulaic.get_model_matrix(
-        data=data,
-        ensure_full_rank=ensure_full_rank,
-        na_action="drop",
-        output="pandas",
-        context=FORMULAIC_TRANSFORMS | {**capture_context(context)},
+
+    model_matrix = cast(
+        formulaic.ModelMatrix[IntoDataFrameT],
+        formula_formulaic.get_model_matrix(
+            data=data,
+            ensure_full_rank=ensure_full_rank,
+            na_action="drop",
+            # output="pandas",
+            context=FORMULAIC_TRANSFORMS | {**capture_context(context)},
+        ),
     )
+
+    # TODO: need to figure out how to do this
     drop_rows: set[int] = set(range(n_observations)).difference(
         model_matrix[_ModelMatrixKey.main]["lhs"].index
     )
@@ -336,7 +352,7 @@ def create_model_matrix(
 
 def _get_formulaic_formula(
     formula: Formula,
-    data: pd.DataFrame,
+    data: IntoDataFrame,
     weights: str | None = None,
 ) -> formulaic.Formula:
     # Collate kwargs to be passed to formulaic.Formula
@@ -349,11 +365,27 @@ def _get_formulaic_formula(
         formula_kwargs.update(
             {_ModelMatrixKey.instrumental_variable: formula.first_stage}
         )
+
     if weights is not None:
-        data[weights] = _get_weights(data, weights)
+        w = nw.from_native(data).get_column(weights)
+
+        if not w.dtype.is_numeric():
+            try:
+                w = w.cast(nw.Float64)
+            except nw.exceptions.InvalidOperationError:
+                raise ValueError(f"The weights column '{weights}' must be numeric.")
+
+        if (w < 0).any():
+            raise ValueError(
+                f"The weights column '{weights}' must not contain negative values."
+            )
+
+        data = nw.from_native(data).with_columns(w.alias(weights)).to_native()
+
         formula_kwargs.update({_ModelMatrixKey.weights: f"{weights}-1"})
+
     formula_formulaic = formulaic.Formula(
-        formula_kwargs,
+        formula_kwargs,  # type: ignore
         _parser=DefaultFormulaParser(
             feature_flags=FORMULAIC_FEATURE_FLAG,
             # When FEs are present, include_intercept=True so that spans_intercept=True
@@ -364,5 +396,5 @@ def _get_formulaic_formula(
             # would then drop the last level instead of the first, mismatching R.
             include_intercept=formula.is_fixed_effects,
         ),
-    )
+    )  # type: ignore
     return formula_formulaic
