@@ -26,6 +26,9 @@ class _ModelMatrixKey:
     weights: str = "weights"
 
 
+MM = Structured[formulaic.ModelMatrix[IntoDataFrameT]]
+
+
 class ModelMatrix(Generic[IntoDataFrameT]):
     """
     A wrapper around formulaic.ModelMatrix for the specification of PyFixest models.
@@ -59,7 +62,7 @@ class ModelMatrix(Generic[IntoDataFrameT]):
 
     def __init__(
         self,
-        model_matrix: formulaic.ModelMatrix[IntoDataFrameT],
+        model_matrix: MM[IntoDataFrameT],
         drop_rows: set[int],
         drop_singletons: bool = True,
         drop_intercept: bool = False,
@@ -74,7 +77,7 @@ class ModelMatrix(Generic[IntoDataFrameT]):
         self._process(dropped_rows=drop_rows, drop_singletons=drop_singletons)
 
     @staticmethod
-    def _get_columns(mm: formulaic.ModelMatrix, *keys: str) -> list[str] | None:
+    def _get_columns(mm: MM[IntoDataFrameT], *keys: str) -> list[str] | None:
         """Extract column names by traversing nested keys, or None if missing."""
         try:
             result = mm
@@ -88,7 +91,7 @@ class ModelMatrix(Generic[IntoDataFrameT]):
         except KeyError:
             return None
 
-    def _collect_columns(self, model_matrix: formulaic.ModelMatrix) -> None:
+    def _collect_columns(self, model_matrix: MM[IntoDataFrameT]) -> None:
         self._dependent = self._get_columns(model_matrix, _ModelMatrixKey.main, "lhs")
         self._independent = self._get_columns(model_matrix, _ModelMatrixKey.main, "rhs")
         self._fixed_effects = self._get_columns(
@@ -102,7 +105,7 @@ class ModelMatrix(Generic[IntoDataFrameT]):
         )
         self._weights = self._get_columns(model_matrix, _ModelMatrixKey.weights)
 
-    def _collect_data(self, model_matrix: Structured[formulaic.ModelMatrix]) -> None:
+    def _collect_data(self, model_matrix: MM[IntoDataFrameT]) -> None:
 
         def _combine(df1: nw.DataFrame, df2: nw.DataFrame) -> nw.DataFrame:
             new_columns = set(df2.columns) - set(df1.columns)
