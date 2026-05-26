@@ -2,7 +2,7 @@ import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import reduce
-from typing import Any, Final, Generic, cast
+from typing import Any, Generic, cast
 
 import formulaic
 import narwhals as nw
@@ -61,7 +61,7 @@ class ModelMatrix(Generic[IntoDataFrameT]):
     def __init__(
         self,
         model_matrix: MM[IntoDataFrameT],
-        drop_rows: set[int],
+        data: IntoDataFrameT,
         drop_singletons: bool = True,
         drop_intercept: bool = False,
     ) -> None:
@@ -72,7 +72,7 @@ class ModelMatrix(Generic[IntoDataFrameT]):
 
         self._collect_columns(model_matrix)
         self._collect_data(model_matrix)
-        self._process(dropped_rows=drop_rows, drop_singletons=drop_singletons)
+        self._process(data=data, drop_singletons=drop_singletons)
 
     @staticmethod
     def _get_columns(mm: MM[IntoDataFrameT], *keys: str) -> list[str] | None:
@@ -126,14 +126,25 @@ class ModelMatrix(Generic[IntoDataFrameT]):
             (nw.from_native(df) for df in model_matrix._flatten()),  # type: ignore
         ).to_native()
 
-    def _process(self, dropped_rows: set[int], drop_singletons: bool = False) -> None:
+    def _process(self, data: IntoDataFrameT, drop_singletons: bool = False) -> None:
         """Validate, clean, and finalize the collected model matrix data.
+
+        Adds a sequential row index, then drops rows with null values in any
+        formula-referenced column, rows with infinite values in any float column,
+        and (optionally) singleton fixed effect observations. The indices of all
+        dropped rows are stored in na_index, which is used as a hashable cache
+        key for demeaned data in multi-model estimation.
+
+        The null check uses the original pre-formula data rather than the model
+        matrix because formulaic with na_action="ignore" can absorb NaN into
+        zeros when encoding categoricals (e.g. C(f1)), so NaN would not
+        propagate to the model matrix columns.
 
         Parameters
         ----------
-        dropped_rows : set[int]
-            Original row indices already dropped by formulaic's NA handling.
-            Extended in-place with any additional rows dropped here.
+        data : IntoDataFrameT
+            The original input data, used to detect null values in
+            formula-referenced columns before any encoding is applied.
         drop_singletons : bool, default False
             If True, drop observations that are singletons in any fixed effect
             group and warn about the count removed.
@@ -141,12 +152,10 @@ class ModelMatrix(Generic[IntoDataFrameT]):
         Raises
         ------
         TypeError
-            If the dependent variable has more than one column (non-numeric
-            dependent triggers formulaic contrast encoding, producing multiple
+            If the dependent variable has more than one column (a non-numeric
+            dependent triggers formulaic contrast encoding producing multiple
             columns), or if the endogenous variable has more than one column.
         """
-        # TODO: this was mostly claude -- should double check
-
         if nw.from_native(self.dependent).shape[1] != 1:
             # If the dependent variable is not numeric, formulaic's contrast encoding kicks in
             # creating multiple columns for the dependent variable
@@ -159,63 +168,77 @@ class ModelMatrix(Generic[IntoDataFrameT]):
         ):
             raise TypeError("The endogenous variable must be numeric.")
 
-        df = nw.from_native(self._data)
-        ns = nw.get_native_namespace(df)
+        df = nw.from_native(self._data).with_row_index("__row_index__")
+        n = df.shape[0]
+        backend = nw.get_native_namespace(df)
 
-        # rows in df are exactly the complement of dropped_rows in the original data,
-        # so we can recover original indices without passing n_observations explicitly
-        n_total = df.shape[0] + len(dropped_rows)
-        original_indices = sorted(set(range(n_total)) - dropped_rows)
-        df = df.with_columns(
-            nw.Series.from_iterable("__orig_idx__", original_indices, backend=ns)
-        )
+        # drop rows with null in any formula-referenced column, checked against the
+        # original data because C(col) encodes NaN as zeros and hides it from the matrix
+        formula_vars = {
+            v
+            for item in self._model_spec._flatten()  # type: ignore[attr-defined]
+            if hasattr(item, "variables")
+            for v in item.variables
+        }
+        raw_df = nw.from_native(data)
+        null_cols = [c for c in formula_vars if c in raw_df.columns]
+        if null_cols:
+            is_null = raw_df.select(
+                nw.any_horizontal(
+                    *(nw.col(c).is_null() for c in null_cols), ignore_nulls=True
+                ).alias("__is_null__")
+            ).get_column("__is_null__")
+            n_null = int(is_null.sum())
+            if n_null > 0:
+                df = df.filter(~is_null)
+                warnings.warn(f"{n_null} rows with NA values dropped from the model.")
 
-        # drop rows with non-finite values
-        # TODO: it really feels like this null filtering should be happening upstream in formulaic.
-        # we should open a PR there to allow for custom row-filtering
-
-        # TODO: use narwhals selectors here
-        float_cols = [c for c, dt in df.schema.items() if dt.is_float()]
+        # drop rows with infinite values in any float column (NAs already removed)
+        float_cols = [
+            c for c, dt in df.schema.items() if dt in (nw.Float32, nw.Float64)
+        ]
         if float_cols:
-            is_bad = df.select(
+            is_inf = df.select(
                 nw.any_horizontal(
                     *(~nw.col(c).is_finite() for c in float_cols), ignore_nulls=True
-                ).alias("__is_bad__")
-            ).get_column("__is_bad__")
-            n_bad = int(is_bad.sum())
-            if n_bad > 0:
-                dropped_rows |= set(df.filter(is_bad)["__orig_idx__"].to_list())
-                df = df.filter(~is_bad)
+                ).alias("__is_inf__")
+            ).get_column("__is_inf__")
+            n_inf = int(is_inf.sum())
+            if n_inf > 0:
+                df = df.filter(~is_inf)
                 warnings.warn(
-                    f"{n_bad} rows with infinite values dropped from the model."
+                    f"{n_inf} rows with infinite values dropped from the model."
                 )
 
-        if self._fixed_effects is not None:
-            df = df.with_columns(nw.col(*self._fixed_effects).cast(nw.Int32))
-
+        # remove intercept
         if self._fixed_effects is not None or self._drop_intercept:
             if self._independent is not None:
                 self._independent = [c for c in self._independent if c != "Intercept"]
             if self._instruments is not None:
                 self._instruments = [c for c in self._instruments if c != "Intercept"]
 
+        if self._fixed_effects is not None:
+            df = df.with_columns(nw.col(*self._fixed_effects).cast(nw.Int32))
+
+        # drop singletons
         if drop_singletons and self._fixed_effects is not None:
             singleton_mask = detect_singletons(
                 df.select(self._fixed_effects).to_numpy()
             )
             is_singleton = nw.Series.from_iterable(
-                "__is_singleton__", singleton_mask.tolist(), backend=ns
+                "__is_singleton__",
+                singleton_mask.tolist(),
+                backend=backend,
             )
             n_singleton = int(is_singleton.sum())
             if n_singleton > 0:
-                dropped_rows |= set(df.filter(is_singleton)["__orig_idx__"].to_list())
                 df = df.filter(~is_singleton)
                 warnings.warn(
                     f"{n_singleton} singleton fixed effect(s) dropped from the model."
                 )
 
-        self._data = df.drop("__orig_idx__").to_native()
-        self._na_index = frozenset(dropped_rows)
+        self._data = df.drop("__row_index__").to_native()
+        self._na_index = frozenset(range(n)) - frozenset(df["__row_index__"])
 
     @property
     def dependent(self) -> IntoDataFrameT:
@@ -382,9 +405,6 @@ def create_model_matrix(
         dropped observations.
 
     """
-    data = nw.from_native(data).with_row_index("__row_index__").to_native()
-    n_observations: Final[int] = nw.from_native(data).shape[0]
-
     formula_formulaic = _get_formulaic_formula(
         formula=formula, data=data, weights=weights
     )
@@ -394,19 +414,14 @@ def create_model_matrix(
         formula_formulaic.get_model_matrix(
             data=data,
             ensure_full_rank=ensure_full_rank,
-            na_action="drop",
-            # output="pandas",
+            na_action="ignore",
             context=FORMULAIC_TRANSFORMS | {**capture_context(context)},
         ),
     )
 
-    # TODO: need to figure out how to do this
-    drop_rows: set[int] = set(range(n_observations)).difference(
-        model_matrix[_ModelMatrixKey.main]["lhs"].index
-    )
     return ModelMatrix(
         model_matrix,
-        drop_rows=drop_rows,
+        data=data,
         drop_singletons=drop_singletons,
         drop_intercept=drop_intercept,
     )
