@@ -10,6 +10,8 @@ from formulaic.utils.sentinels import UNSET
 if TYPE_CHECKING:
     from formulaic.model_spec import ModelSpec
 
+# TODO: convert this file to narwhals
+
 
 def factor_interaction(
     data: Any,
@@ -78,10 +80,15 @@ def _get_series_name(data: Any, default: str = "var") -> str:
     """Extract name from Series/DataFrame column, or return default."""
     if data is None:
         return default
+
     if isinstance(data, FactorValues):
         data = data.__wrapped__
+
     if isinstance(data, pd.Series) and data.name is not None:
         return str(data.name)
+
+    # TODO: handle narwhals series here
+
     return default
 
 

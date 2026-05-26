@@ -38,17 +38,17 @@ class ModelMatrix(Generic[IntoDataFrameT]):
 
     Attributes
     ----------
-    dependent : pd.DataFrame
+    dependent : IntoDataFrameT
         The dependent variable(s) (left-hand side of the main equation).
-    independent : pd.DataFrame
+    independent : IntoDataFrameT
         The independent variable(s) (right-hand side of the main equation).
-    fixed_effects : pd.DataFrame or None
+    fixed_effects : IntoDataFrameT or None
         Fixed effects variables, encoded as integers.
-    endogenous : pd.DataFrame or None
+    endogenous : IntoDataFrameT or None
         Endogenous variables in instrumental variable specifications.
-    instruments : pd.DataFrame or None
+    instruments : IntoDataFrameT or None
         Instrumental variables for IV estimation.
-    weights : pd.DataFrame or None
+    weights : IntoDataFrameT or None
         Observation weights for weighted estimation.
     model_spec : formulaic.ModelSpec
         The underlying formulaic model specification.
@@ -156,6 +156,8 @@ class ModelMatrix(Generic[IntoDataFrameT]):
             dependent triggers formulaic contrast encoding producing multiple
             columns), or if the endogenous variable has more than one column.
         """
+        # TODO: revisit this implementation (currently quite cludgy and probably slow)
+
         if nw.from_native(self.dependent).shape[1] != 1:
             # If the dependent variable is not numeric, formulaic's contrast encoding kicks in
             # creating multiple columns for the dependent variable
@@ -247,7 +249,7 @@ class ModelMatrix(Generic[IntoDataFrameT]):
 
         Returns
         -------
-        pd.DataFrame
+        IntoDataFrameT
             DataFrame containing the dependent variable(s) (left-hand side
             of the main equation).
         """
@@ -261,7 +263,7 @@ class ModelMatrix(Generic[IntoDataFrameT]):
 
         Returns
         -------
-        pd.DataFrame
+        IntoDataFrameT
             DataFrame containing the independent variable(s) (right-hand side
             of the main equation). Intercept columns are excluded when fixed
             effects are present.
@@ -276,7 +278,7 @@ class ModelMatrix(Generic[IntoDataFrameT]):
 
         Returns
         -------
-        pd.DataFrame or None
+        IntoDataFrameT or None
             DataFrame containing the fixed effects variables encoded as integers,
             or None if no fixed effects are specified in the model.
         """
@@ -292,7 +294,7 @@ class ModelMatrix(Generic[IntoDataFrameT]):
 
         Returns
         -------
-        pd.DataFrame or None
+        IntoDataFrameT or None
             DataFrame containing the endogenous variable(s) (left-hand side
             of the first-stage equation in IV estimation), or None if not
             using instrumental variables.
@@ -309,7 +311,7 @@ class ModelMatrix(Generic[IntoDataFrameT]):
 
         Returns
         -------
-        pd.DataFrame or None
+        IntoDataFrameT or None
             DataFrame containing the instrumental variable(s) (right-hand side
             of the first-stage equation in IV estimation), or None if not
             using instrumental variables. Intercept columns are excluded when
@@ -327,7 +329,7 @@ class ModelMatrix(Generic[IntoDataFrameT]):
 
         Returns
         -------
-        pd.DataFrame or None
+        IntoDataFrameT or None
             DataFrame containing the observation weights (must be non-negative
             numeric values), or None if no weights are specified.
         """
@@ -376,9 +378,8 @@ def create_model_matrix(
     formula : Formula
         A Formula object specifying the model structure, including dependent and
         independent variables, fixed effects, and instrumental variables.
-    data : pd.DataFrame
+    data : IntoDataFrameT
         The input data containing all variables referenced in the formula.
-        The index will be reset during processing.
     weights : str or None, default=None
         Column name in data to use as observation weights. Weights must be
         non-negative numeric values. If None, no weighting is applied.
@@ -414,6 +415,9 @@ def create_model_matrix(
         formula_formulaic.get_model_matrix(
             data=data,
             ensure_full_rank=ensure_full_rank,
+            # we have custom dropping rules (e.g. infinite values, singleton FES),
+            # so we implement our own row-dropping logic later.
+            # TODO: at some point, it would be nice to upstream custom row-dropping logic
             na_action="ignore",
             context=FORMULAIC_TRANSFORMS | {**capture_context(context)},
         ),
