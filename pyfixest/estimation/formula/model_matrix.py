@@ -1,6 +1,7 @@
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import reduce
 from typing import Any, Final, Generic, cast
 
 import formulaic
@@ -8,6 +9,7 @@ import narwhals as nw
 import numpy as np
 import pandas as pd
 from formulaic.parser import DefaultFormulaParser
+from formulaic.utils.structured import Structured
 from narwhals.typing import IntoDataFrame, IntoDataFrameT
 
 from pyfixest.core.detect_singletons import detect_singletons
@@ -100,12 +102,28 @@ class ModelMatrix(Generic[IntoDataFrameT]):
         )
         self._weights = self._get_columns(model_matrix, _ModelMatrixKey.weights)
 
-    def _collect_data(self, model_matrix: formulaic.ModelMatrix) -> None:
-        datas: list[pd.DataFrame] = list(model_matrix._flatten())
-        if not all(datas[0].index.identical(other.index) for other in datas[1:]):
-            raise ValueError("All design matrix data must have the same index.")
-        data = pd.concat(datas, ignore_index=False, axis=1)
-        self._data = data.loc[:, ~data.columns.duplicated()]
+    def _collect_data(self, model_matrix: Structured[formulaic.ModelMatrix]) -> None:
+
+        def _combine(df1: nw.DataFrame, df2: nw.DataFrame) -> nw.DataFrame:
+            new_columns = set(df2.columns) - set(df1.columns)
+
+            if not new_columns:
+                return df1
+
+            # NOTE: old pandas code was this
+            # >>> data = pd.concat(datas, ignore_index=False, axis=1)
+            # do we need to do something special for ignore_index=False?
+            # tests pass, so i assume no...
+
+            return nw.concat(
+                [df1, df2.select(new_columns)],
+                how="horizontal",
+            )
+
+        self._data = reduce(
+            _combine,
+            (nw.from_native(df) for df in model_matrix._flatten()),  # type: ignore
+        ).to_native()
 
     def _process(self, dropped_rows: set[int], drop_singletons: bool = False) -> None:
         if self.dependent.shape[1] != 1:
