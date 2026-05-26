@@ -3,41 +3,36 @@ import itertools
 from typing import Final
 
 import narwhals.stable.v1 as nw
-import pandas as pd
 from formulaic.parser import DefaultOperatorResolver
 from formulaic.parser.types import Operator, OrderedSet
 from formulaic.utils.stateful_transforms import stateful_transform
-from narwhals.typing import IntoSeries
+from narwhals.stable.v1.typing import IntoSeriesT
 
 
 @stateful_transform
-def encode_fixed_effects(*args, _state=None, _metadata=None, _spec=None):
+def encode_fixed_effects(*args: IntoSeriesT, _state: dict) -> IntoSeriesT:
     """Encode fixed effect interactions for model matrix construction."""
-    data = pd.concat(args, axis=1)
-    _encoding: Final[str] = "__fixed_effect_encoding__"
-    if _encoding not in _state:
-        data[_encoding] = data.groupby(data.columns.tolist()).ngroup()
-        _state[_encoding] = data.drop_duplicates()
-        return data[_encoding]
-
-    return data.merge(_state[_encoding], on=data.columns.tolist(), how="left")[
-        _encoding
-    ]
-
-
-# TODO: finish this
-# TODO: type these args
-def encode_fixed_effects_narwhals(
-    *args: IntoSeries, _state=None, _metadata=None, _spec=None
-):
     _encoding: Final[str] = "__fixed_effect_encoding__"
 
+    # concat series into a single df
     data = nw.concat(
         [nw.from_native(s, series_only=True).to_frame() for s in args],
         how="horizontal",
     )
 
-    raise NotImplementedError
+    if _encoding not in _state:
+        # get mapping from FEs -> integers
+        # sort so that is stable across runs
+        # (not strictly necessary but is nice and has negligible perf. overhead)
+        _state[_encoding] = (
+            data.unique().sort(data.columns).with_row_index(name=_encoding)
+        )
+
+    return (
+        data.join(_state[_encoding], on=data.columns, how="left")
+        .get_column(_encoding)
+        .to_native()
+    )
 
 
 class _FixedEffectsOperatorResolver(DefaultOperatorResolver):
