@@ -6,8 +6,6 @@ from typing import Any, Final, Generic, cast
 
 import formulaic
 import narwhals as nw
-import numpy as np
-import pandas as pd
 from formulaic.parser import DefaultFormulaParser
 from formulaic.utils.structured import Structured
 from narwhals.typing import IntoDataFrame, IntoDataFrameT
@@ -129,51 +127,94 @@ class ModelMatrix(Generic[IntoDataFrameT]):
         ).to_native()
 
     def _process(self, dropped_rows: set[int], drop_singletons: bool = False) -> None:
-        if self.dependent.shape[1] != 1:
+        """Validate, clean, and finalize the collected model matrix data.
+
+        Parameters
+        ----------
+        dropped_rows : set[int]
+            Original row indices already dropped by formulaic's NA handling.
+            Extended in-place with any additional rows dropped here.
+        drop_singletons : bool, default False
+            If True, drop observations that are singletons in any fixed effect
+            group and warn about the count removed.
+
+        Raises
+        ------
+        TypeError
+            If the dependent variable has more than one column (non-numeric
+            dependent triggers formulaic contrast encoding, producing multiple
+            columns), or if the endogenous variable has more than one column.
+        """
+        # TODO: this was mostly claude -- should double check
+
+        if nw.from_native(self.dependent).shape[1] != 1:
             # If the dependent variable is not numeric, formulaic's contrast encoding kicks in
             # creating multiple columns for the dependent variable
             # TODO: Make this check more explicit?
             raise TypeError("The dependent variable must be numeric.")
-        if self.endogenous is not None and self.endogenous.shape[1] != 1:
+
+        if (
+            self.endogenous is not None
+            and nw.from_native(self.endogenous).shape[1] != 1
+        ):
             raise TypeError("The endogenous variable must be numeric.")
-        # Drop rows with non-finite values
-        is_infinite = pd.Series(
-            ~np.isfinite(self._data).all(axis=1), index=self._data.index
+
+        df = nw.from_native(self._data)
+        ns = nw.get_native_namespace(df)
+
+        # rows in df are exactly the complement of dropped_rows in the original data,
+        # so we can recover original indices without passing n_observations explicitly
+        n_total = df.shape[0] + len(dropped_rows)
+        original_indices = sorted(set(range(n_total)) - dropped_rows)
+        df = df.with_columns(
+            nw.Series.from_iterable("__orig_idx__", original_indices, backend=ns)
         )
-        if is_infinite.any():
-            infinite_indices = is_infinite[is_infinite].index.tolist()
-            dropped_rows |= set(infinite_indices)
-            self._data.drop(infinite_indices, inplace=True)
-            warnings.warn(
-                f"{is_infinite.sum()} rows with infinite values dropped from the model.",
-            )
-        if self._fixed_effects is not None:
-            # Ensure fixed effects are `int32`
-            self._data[self._fixed_effects] = self._data[self._fixed_effects].astype(
-                "int32"
-            )
-        if self.fixed_effects is not None or self._drop_intercept:
-            if self._independent is not None:
-                self._independent = [
-                    col for col in self._independent if col != "Intercept"
-                ]
-            if self._instruments is not None:
-                self._instruments = [
-                    col for col in self._instruments if col != "Intercept"
-                ]
-        # Drop singletons if specified
-        if drop_singletons and self.fixed_effects is not None:
-            is_singleton = pd.Series(
-                detect_singletons(self.fixed_effects.to_numpy()),
-                index=self._data.index,
-            )
-            if is_singleton.any():
-                singleton_indices = self._data[is_singleton].index.tolist()
-                dropped_rows |= set(singleton_indices)
-                self._data.drop(singleton_indices, inplace=True)
+
+        # drop rows with non-finite values
+        # TODO: it really feels like this null filtering should be happening upstream in formulaic.
+        # we should open a PR there to allow for custom row-filtering
+
+        # TODO: use narwhals selectors here
+        float_cols = [c for c, dt in df.schema.items() if dt.is_float()]
+        if float_cols:
+            is_bad = df.select(
+                nw.any_horizontal(
+                    *(~nw.col(c).is_finite() for c in float_cols), ignore_nulls=True
+                ).alias("__is_bad__")
+            ).get_column("__is_bad__")
+            n_bad = int(is_bad.sum())
+            if n_bad > 0:
+                dropped_rows |= set(df.filter(is_bad)["__orig_idx__"].to_list())
+                df = df.filter(~is_bad)
                 warnings.warn(
-                    f"{is_singleton.sum()} singleton fixed effect(s) dropped from the model."
+                    f"{n_bad} rows with infinite values dropped from the model."
                 )
+
+        if self._fixed_effects is not None:
+            df = df.with_columns(nw.col(*self._fixed_effects).cast(nw.Int32))
+
+        if self._fixed_effects is not None or self._drop_intercept:
+            if self._independent is not None:
+                self._independent = [c for c in self._independent if c != "Intercept"]
+            if self._instruments is not None:
+                self._instruments = [c for c in self._instruments if c != "Intercept"]
+
+        if drop_singletons and self._fixed_effects is not None:
+            singleton_mask = detect_singletons(
+                df.select(self._fixed_effects).to_numpy()
+            )
+            is_singleton = nw.Series.from_iterable(
+                "__is_singleton__", singleton_mask.tolist(), backend=ns
+            )
+            n_singleton = int(is_singleton.sum())
+            if n_singleton > 0:
+                dropped_rows |= set(df.filter(is_singleton)["__orig_idx__"].to_list())
+                df = df.filter(~is_singleton)
+                warnings.warn(
+                    f"{n_singleton} singleton fixed effect(s) dropped from the model."
+                )
+
+        self._data = df.drop("__orig_idx__").to_native()
         self._na_index = frozenset(dropped_rows)
 
     @property
@@ -349,7 +390,7 @@ def create_model_matrix(
     )
 
     model_matrix = cast(
-        formulaic.ModelMatrix[IntoDataFrameT],
+        Structured[formulaic.ModelMatrix[IntoDataFrameT]],
         formula_formulaic.get_model_matrix(
             data=data,
             ensure_full_rank=ensure_full_rank,
