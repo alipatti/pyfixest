@@ -120,36 +120,35 @@ class Feglm(Feols, ABC):
             and self.separation_check is not None
             and self.separation_check  # not an empty list
         ):
+            # reconstruct DataFrames for the separation check functions (pandas API required)
+            Y_df = pd.DataFrame(self._Y, columns=[self._depvar])
+            X_df = pd.DataFrame(self._X, columns=self._coefnames)
+            fe_df = pd.DataFrame(self._fe, columns=self._fe_colnames)
             na_separation = _check_for_separation(
-                Y=self._Y,
-                X=self._X,
-                fe=self._fe,
+                Y=Y_df,
+                X=X_df,
+                fe=fe_df,
                 fml=self._fml,
                 data=self._data,
                 methods=self.separation_check,
             )
 
         if na_separation:
-            self._Y.drop(na_separation, axis=0, inplace=True)
-            self._X.drop(na_separation, axis=0, inplace=True)
-            self._fe.drop(na_separation, axis=0, inplace=True)
-            self._data.drop(na_separation, axis=0, inplace=True)
+            mask = np.ones(len(self._Y), dtype=bool)
+            mask[na_separation] = False
+            self._Y = self._Y[mask]
+            self._X = self._X[mask]
+            if self._fe is not None:
+                self._fe = self._fe[mask]
+            self._data = self._data.drop(index=na_separation).reset_index(drop=True)
             self._N = self._Y.shape[0]
 
             self.na_index = np.concatenate([self.na_index, np.array(na_separation)])
             self.n_separation_na = len(na_separation)
 
     def to_array(self):
-        "Turn estimation DataFrames to np arrays."
-        self._Y, self._X, self._Z = (
-            self._Y.to_numpy(),
-            self._X.to_numpy(),
-            self._X.to_numpy(),
-        )
-        if self._fe is not None:
-            self._fe = self._fe.to_numpy()
-            if self._fe.ndim == 1:
-                self._fe = self._fe.reshape((self._N, 1))
+        "Set Z = X for non-IV GLM estimation."
+        self._Z = self._X
 
     def get_fit(self):
         """

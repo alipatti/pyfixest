@@ -5,6 +5,7 @@ from importlib import import_module
 from typing import Any, Literal, cast
 
 import formulaic
+import narwhals as nw
 import numpy as np
 import pandas as pd
 from formulaic.parser import DefaultFormulaParser
@@ -415,29 +416,60 @@ class Feols(ResultAccessorMixin):
             context=self._context,
         )
 
-        self._Y = model_matrix.dependent
-        self._Y_untransformed = model_matrix.dependent.copy()
-        self._X = model_matrix.independent
-        self._fe = model_matrix.fixed_effects
-        self._endogvar = model_matrix.endogenous
-        self._Z = model_matrix.instruments
+        # extract column names before converting to numpy
+        dep_frame = nw.from_native(model_matrix.dependent)
+        indep_frame = nw.from_native(model_matrix.independent)
+        y_names = dep_frame.columns
+        x_names = indep_frame.columns
+
+        dep_arr = dep_frame.to_numpy()
+        self._Y = dep_arr
+        self._Y_untransformed = dep_arr.copy()
+        self._X = indep_frame.to_numpy()
+
+        if (fe_native := model_matrix.fixed_effects) is not None:
+            fe_frame = nw.from_native(fe_native)
+            self._fe_colnames: list[str] | None = list(fe_frame.columns)
+            self._fe: np.ndarray | None = fe_frame.to_numpy()
+        else:
+            self._fe_colnames = None
+            self._fe = None
+
+        if model_matrix.endogenous is not None:
+            endogvar_frame = nw.from_native(model_matrix.endogenous)
+            self._endogvar_names: list[str] | None = list(endogvar_frame.columns)
+            self._endogvar: np.ndarray | None = endogvar_frame.to_numpy()
+        else:
+            self._endogvar_names = None
+            self._endogvar = None
+
+        if model_matrix.instruments is not None:
+            self._Z: np.ndarray | None = nw.from_native(model_matrix.instruments).to_numpy()
+        else:
+            self._Z = None
+
         self._weights_df = model_matrix.weights
         self._na_index = model_matrix.na_index
+
         # TODO: set dynamically based on naming set in pyfixest.estimation.formula.factor_interaction._encode_i
         is_icovar = (
-            self._X.columns.str.contains(r"^.+::.+$") if not self._X.empty else None
+            [bool(re.search(r"^.+::.+$", col)) for col in x_names] if x_names else None
         )
         self._icovars = (
-            self._X.columns[is_icovar].tolist()
-            if is_icovar is not None and is_icovar.any()
+            [col for col, flag in zip(x_names, is_icovar) if flag]
+            if is_icovar is not None and any(is_icovar)
             else None
         )
-        self._X_is_empty = not model_matrix.independent.shape[0] > 0
+        self._X_is_empty = not (self._X.shape[0] > 0)
         self._model_spec = model_matrix.model_spec
 
-        self._coefnames = self._X.columns.tolist()
-        self._coefnames_z = self._Z.columns.tolist() if self._Z is not None else None
-        self._depvar = self._Y.columns[0]
+        self._coefnames = list(x_names)
+        self._coefnames_z = (
+            list(nw.from_native(model_matrix.instruments).columns)
+            if model_matrix.instruments is not None
+            else None
+        )
+        self._depvar = y_names[0]
 
         self._has_fixef = self._fe is not None
         self._fixef = (
@@ -446,7 +478,13 @@ class Feols(ResultAccessorMixin):
             else None
         )
 
-        self._k_fe = self._fe.nunique(axis=0) if self._has_fixef else None
+        if self._has_fixef:
+            assert self._fe is not None
+            self._k_fe: np.ndarray | None = np.array(
+                [len(np.unique(self._fe[:, i])) for i in range(self._fe.shape[1])]
+            )
+        else:
+            self._k_fe = None
         self._n_fe = len(self._k_fe) if self._has_fixef else 0
 
         # update data
@@ -499,9 +537,11 @@ class Feols(ResultAccessorMixin):
     def demean(self):
         "Demean the dependent variable and covariates by the fixed effect(s)."
         if self._has_fixef:
-            self._Yd, self._Xd = demean_model(
+            self._Y, self._X = demean_model(
                 self._Y,
                 self._X,
+                [self._depvar],
+                self._coefnames,
                 self._fe,
                 self._weights.flatten(),
                 self._lookup_demeaned_data,
@@ -509,17 +549,7 @@ class Feols(ResultAccessorMixin):
                 self._fixef_tol,
                 self._fixef_maxiter,
                 self._demean_func,
-                # self._demeaner_backend,
             )
-        else:
-            self._Yd, self._Xd = self._Y, self._X
-
-    def to_array(self):
-        "Convert estimation data frames to np arrays."
-        self._Y, self._X = (
-            self._Yd.to_numpy(),
-            self._Xd.to_numpy(),
-        )
 
     def wls_transform(self):
         "Transform model matrices for WLS Estimation."
@@ -548,7 +578,7 @@ class Feols(ResultAccessorMixin):
         self._k = self._X.shape[1] if not self._X_is_empty else 0
 
     def _get_predictors(self) -> None:
-        self._Y_hat_link = self._Y_untransformed.to_numpy().flatten() - self.resid()
+        self._Y_hat_link = np.asarray(self._Y_untransformed).flatten() - self.resid()
         self._Y_hat_response = self._Y_hat_link
 
     def get_fit(self) -> None:
@@ -560,7 +590,6 @@ class Feols(ResultAccessorMixin):
         None
         """
         self.demean()
-        self.to_array()
         self.drop_multicol_vars()
         self.wls_transform()
 
@@ -764,9 +793,7 @@ class Feols(ResultAccessorMixin):
                     ),
                     cluster_colnames=np.array(self._cluster_df.columns, dtype=str),
                     cluster_data=cluster_arr_int.astype(np.uintp),
-                    fe_data=self._fe.to_numpy().astype(np.uintp)
-                    if isinstance(self._fe, pd.DataFrame)
-                    else self._fe.astype(np.uintp),
+                    fe_data=self._fe.astype(np.uintp),
                 )
 
                 k_fe_nested = (
@@ -1100,9 +1127,6 @@ class Feols(ResultAccessorMixin):
                 "_X",
                 "_Y",
                 "_Z",
-                "_Xd",
-                "_Yd",
-                "_Zd",
                 "_cluster_df",
                 "_tXZ",
                 "_tZy",
@@ -1182,7 +1206,7 @@ class Feols(ResultAccessorMixin):
         print(f"Python p_stat: {p_stat}")
         ```
         """
-        k_fe = np.sum(self._k_fe.values) if self._has_fixef else 0
+        k_fe = np.sum(self._k_fe) if self._has_fixef else 0
 
         # If R is None, default to the identity matrix
         if R is None:

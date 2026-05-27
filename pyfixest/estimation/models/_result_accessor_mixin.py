@@ -24,12 +24,12 @@ class ResultAccessorMixin:
     _u_hat: np.ndarray
     _weights: np.ndarray
     _Y: np.ndarray
-    _Y_untransformed: pd.Series
+    _Y_untransformed: np.ndarray | pd.Series
     _coefnames: list[str]
     _method: str
     _drop_intercept: bool
     _has_fixef: bool
-    _k_fe: pd.Series
+    _k_fe: np.ndarray | pd.Series | None
     _N: int
     _k: int
     _df_t: int
@@ -117,7 +117,7 @@ class ResultAccessorMixin:
         computed on demeaned dependent variable.
         """
         Y_within = self._Y
-        Y = self._Y_untransformed.to_numpy()
+        Y = np.asarray(self._Y_untransformed)
 
         has_intercept = not self._drop_intercept
 

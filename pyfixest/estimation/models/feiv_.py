@@ -198,19 +198,15 @@ class Feiv(Feols):
             self._endogvar = self._endogvar * w
             self._Z = self._Z * w
 
-    def to_array(self) -> None:
-        "Transform estimation DataFrames to arrays."
-        super().to_array()
-        self._Z = self._Zd.to_numpy()
-        self._endogvar = self._endogvar.to_numpy()
-
     def demean(self) -> None:
         "Demean instruments and endogeneous variable."
         super().demean()
         if self._has_fixef:
-            self._endogvard, self._Zd = demean_model(
+            self._endogvar, self._Z = demean_model(
                 self._endogvar,
                 self._Z,
+                self._endogvar_names,
+                self._coefnames_z,
                 self._fe,
                 self._weights.flatten(),
                 self._lookup_demeaned_data,
@@ -219,9 +215,6 @@ class Feiv(Feols):
                 self._fixef_maxiter,
                 self._demean_func,
             )
-        else:
-            self._endogvard = self._endogvar
-            self._Zd = self._Z
 
     def drop_multicol_vars(self) -> None:
         "Drop multicollinear variables in matrix of instruments Z."
@@ -241,7 +234,6 @@ class Feiv(Feols):
     def get_fit(self) -> None:
         """Fit a IV model using a 2SLS estimator."""
         self.demean()
-        self.to_array()
         self.drop_multicol_vars()
         self.wls_transform()
 

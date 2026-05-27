@@ -155,9 +155,6 @@ class Fepois(Feols):
         "Prepare model inputs for estimation."
         super().prepare_model_matrix()
 
-        # check that self._Y is a pandas Series or DataFrame
-        self._Y = _check_series_or_dataframe(self._Y)
-
         # check that self._Y is a weakly positive number
         if np.any(self._Y < 0):
             raise ValueError("The dependent variable must be a weakly positive number.")
@@ -169,44 +166,48 @@ class Fepois(Feols):
             and self.separation_check is not None
             and self.separation_check  # not an empty list
         ):
+            # reconstruct DataFrames for the separation check functions (pandas API required)
+            Y_df = pd.DataFrame(self._Y, columns=[self._depvar])
+            X_df = pd.DataFrame(self._X, columns=self._coefnames)
+            fe_df = pd.DataFrame(self._fe, columns=self._fe_colnames)
             na_separation = _check_for_separation(
-                Y=self._Y,
-                X=self._X,
-                fe=self._fe,
+                Y=Y_df,
+                X=X_df,
+                fe=fe_df,
                 fml=self._fml,
                 data=self._data,
                 methods=self.separation_check,
             )
 
         if na_separation:
-            self._Y.drop(na_separation, axis=0, inplace=True)
-            self._X.drop(na_separation, axis=0, inplace=True)
-            self._fe.drop(na_separation, axis=0, inplace=True)
-            self._data.drop(na_separation, axis=0, inplace=True)
+            mask = np.ones(len(self._Y), dtype=bool)
+            mask[na_separation] = False
+            self._Y = self._Y[mask]
+            self._X = self._X[mask]
+            if self._fe is not None:
+                self._fe = self._fe[mask]
+            self._data = self._data.drop(index=na_separation).reset_index(drop=True)
             if self._weights_df is not None:
-                self._weights_df.drop(na_separation, axis=0, inplace=True)
+                self._weights_df = self._weights_df.drop(index=na_separation).reset_index(drop=True)
             self._N = self._Y.shape[0]
             self._N_rows = self._N
-            # Re-set weights after dropping rows (handles both weighted and unweighted)
+            # re-set weights after dropping rows (handles both weighted and unweighted)
             self._weights = self._set_weights()
 
             self.na_index = np.concatenate([self.na_index, np.array(na_separation)])
             self.n_separation_na = len(na_separation)
             # possible to have dropped fixed effects level due to separation
-            self._k_fe = self._fe.nunique(axis=0) if self._has_fixef else None
+            if self._has_fixef and self._fe is not None:
+                self._k_fe = np.array(
+                    [len(np.unique(self._fe[:, i])) for i in range(self._fe.shape[1])]
+                )
+            else:
+                self._k_fe = None
             self._n_fe = np.sum(self._k_fe > 1) if self._has_fixef else 0
 
     def to_array(self):
-        "Turn estimation DataFrames to np arrays."
-        self._Y, self._X, self._Z = (
-            self._Y.to_numpy(),
-            self._X.to_numpy(),
-            self._X.to_numpy(),
-        )
-        if self._fe is not None:
-            self._fe = self._fe.to_numpy()
-            if self._fe.ndim == 1:
-                self._fe = self._fe.reshape((self._N, 1))
+        "Set Z = X for non-IV Poisson estimation."
+        self._Z = self._X
 
     def _compute_deviance(
         self, Y: np.ndarray, mu: np.ndarray, weights: np.ndarray | None = None
