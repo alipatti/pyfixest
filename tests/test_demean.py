@@ -78,18 +78,18 @@ def test_set_demeaner_backend():
 )
 def test_demean_model_no_fixed_effects(benchmark, demean_func):
     """Test demean_model when there are no fixed effects."""
-    # Create sample data
     N = 1000
-    Y = pd.DataFrame({"y": np.random.randn(N)})
-    X = pd.DataFrame({"x1": np.random.randn(N), "x2": np.random.randn(N)})
+    Y = np.random.randn(N, 1)
+    X = np.random.randn(N, 2)
     weights = np.ones(N)
-    lookup_dict = {}
+    lookup_dict: dict = {}
 
-    # Test without fixed effects
     Yd, Xd = benchmark(
         demean_model,
         Y=Y,
         X=X,
+        y_names=["y"],
+        x_names=["x1", "x2"],
         fe=None,
         weights=weights,
         lookup_demeaned_data=lookup_dict,
@@ -99,11 +99,8 @@ def test_demean_model_no_fixed_effects(benchmark, demean_func):
         demean_func=demean_func,
     )
 
-    # When no fixed effects, output should equal input
-    assert np.allclose(Y.values, Yd.values)
-    assert np.allclose(X.values, Xd.values)
-    assert Yd.columns.equals(Y.columns)
-    assert Xd.columns.equals(X.columns)
+    assert np.allclose(Y, Yd)
+    assert np.allclose(X, Xd)
 
 
 @pytest.mark.parametrize(
@@ -113,21 +110,21 @@ def test_demean_model_no_fixed_effects(benchmark, demean_func):
 )
 def test_demean_model_with_fixed_effects(benchmark, demean_func):
     """Test demean_model with fixed effects."""
-    # Create sample data
     N = 1000
     rng = np.random.default_rng(42)
 
-    Y = pd.DataFrame({"y": rng.normal(0, 1, N)})
-    X = pd.DataFrame({"x1": rng.normal(0, 1, N), "x2": rng.normal(0, 1, N)})
-    fe = pd.DataFrame({"fe1": rng.integers(0, 10, N), "fe2": rng.integers(0, 5, N)})
+    Y = rng.normal(0, 1, (N, 1))
+    X = rng.normal(0, 1, (N, 2))
+    fe = np.column_stack([rng.integers(0, 10, N), rng.integers(0, 5, N)])
     weights = np.ones(N)
-    lookup_dict = {}
+    lookup_dict: dict = {}
 
-    # Run demean_model
     Yd, Xd = benchmark(
         demean_model,
         Y=Y,
         X=X,
+        y_names=["y"],
+        x_names=["x1", "x2"],
         fe=fe,
         weights=weights,
         lookup_demeaned_data=lookup_dict,
@@ -137,19 +134,15 @@ def test_demean_model_with_fixed_effects(benchmark, demean_func):
         demean_func=demean_func,
     )
 
-    # Verify results are different from input (since we're demeaning)
-    assert not np.allclose(Y.values, Yd.values)
-    assert not np.allclose(X.values, Xd.values)
+    assert not np.allclose(Y, Yd)
+    assert not np.allclose(X, Xd)
 
-    # Verify column names are preserved
-    assert Yd.columns.equals(Y.columns)
-    assert Xd.columns.equals(X.columns)
-
-    # Verify results are cached in lookup_dict
+    # verify results are cached
     assert frozenset() in lookup_dict
-    cached_data = lookup_dict[frozenset()][1]
-    assert np.allclose(cached_data[Y.columns].values, Yd.values)
-    assert np.allclose(cached_data[X.columns].values, Xd.values)
+    cache = lookup_dict[frozenset()]
+    assert np.allclose(cache["y"].reshape(-1, 1), Yd)
+    assert np.allclose(cache["x1"], Xd[:, 0])
+    assert np.allclose(cache["x2"], Xd[:, 1])
 
 
 @pytest.mark.parametrize(
@@ -162,17 +155,18 @@ def test_demean_model_with_weights(benchmark, demean_func):
     N = 1000
     rng = np.random.default_rng(42)
 
-    Y = pd.DataFrame({"y": rng.normal(0, 1, N)})
-    X = pd.DataFrame({"x1": rng.normal(0, 1, N), "x2": rng.normal(0, 1, N)})
-    fe = pd.DataFrame({"fe1": rng.integers(0, 10, N)})
+    Y = rng.normal(0, 1, (N, 1))
+    X = rng.normal(0, 1, (N, 2))
+    fe = rng.integers(0, 10, (N, 1))
     weights = rng.uniform(0.5, 1.5, N)
-    lookup_dict = {}
+    lookup_dict: dict = {}
 
-    # Run with weights
     Yd, Xd = benchmark(
         demean_model,
         Y=Y,
         X=X,
+        y_names=["y"],
+        x_names=["x1", "x2"],
         fe=fe,
         weights=weights,
         lookup_demeaned_data=lookup_dict,
@@ -182,10 +176,11 @@ def test_demean_model_with_weights(benchmark, demean_func):
         demean_func=demean_func,
     )
 
-    # Run without weights for comparison (fresh lookup dict to avoid cache hit)
     Yd_unweighted, Xd_unweighted = demean_model(
         Y=Y,
         X=X,
+        y_names=["y"],
+        x_names=["x1", "x2"],
         fe=fe,
         weights=np.ones(N),
         lookup_demeaned_data={},
@@ -195,9 +190,8 @@ def test_demean_model_with_weights(benchmark, demean_func):
         demean_func=demean_func,
     )
 
-    # Results should be different with weights vs without
-    assert not np.allclose(Yd.values, Yd_unweighted.values)
-    assert not np.allclose(Xd.values, Xd_unweighted.values)
+    assert not np.allclose(Yd, Yd_unweighted)
+    assert not np.allclose(Xd, Xd_unweighted)
 
 
 @pytest.mark.parametrize(
@@ -210,16 +204,18 @@ def test_demean_model_caching(benchmark, demean_func):
     N = 1000
     rng = np.random.default_rng(42)
 
-    Y = pd.DataFrame({"y": rng.normal(0, 1, N)})
-    X = pd.DataFrame({"x1": rng.normal(0, 1, N), "x2": rng.normal(0, 1, N)})
-    fe = pd.DataFrame({"fe1": rng.integers(0, 10, N)})
+    Y = rng.normal(0, 1, (N, 1))
+    X = rng.normal(0, 1, (N, 2))
+    fe = rng.integers(0, 10, (N, 1))
     weights = np.ones(N)
-    lookup_dict = {}
+    lookup_dict: dict = {}
 
-    # First run - should compute and cache
+    # first run — computes and caches
     Yd1, Xd1 = demean_model(
         Y=Y,
         X=X,
+        y_names=["y"],
+        x_names=["x1", "x2"],
         fe=fe,
         weights=weights,
         lookup_demeaned_data=lookup_dict,
@@ -229,11 +225,13 @@ def test_demean_model_caching(benchmark, demean_func):
         demean_func=demean_func,
     )
 
-    # Second run - should use cache
+    # second run — should hit cache
     Yd2, Xd2 = benchmark(
         demean_model,
         Y=Y,
         X=X,
+        y_names=["y"],
+        x_names=["x1", "x2"],
         fe=fe,
         weights=weights,
         lookup_demeaned_data=lookup_dict,
@@ -243,17 +241,17 @@ def test_demean_model_caching(benchmark, demean_func):
         demean_func=demean_func,
     )
 
-    # Results should be identical
-    assert np.allclose(Yd1.values, Yd2.values)
-    assert np.allclose(Xd1.values, Xd2.values)
+    assert np.allclose(Yd1, Yd2)
+    assert np.allclose(Xd1, Xd2)
 
-    # Add new variable and verify partial caching
-    X_new = X.copy()
-    X_new["x3"] = rng.normal(0, 1, N)
+    # add new variable — should use partial cache for x1/x2 and demean only x3
+    X_new = np.column_stack([X, rng.normal(0, 1, N)])
 
     _, Xd3 = demean_model(
         Y=Y,
         X=X_new,
+        y_names=["y"],
+        x_names=["x1", "x2", "x3"],
         fe=fe,
         weights=weights,
         lookup_demeaned_data=lookup_dict,
@@ -263,10 +261,9 @@ def test_demean_model_caching(benchmark, demean_func):
         demean_func=demean_func,
     )
 
-    # Original columns should match previous results
-    assert np.allclose(Xd3[["x1", "x2"]].values, Xd2.values)
-    # New column should be different
-    assert "x3" in Xd3.columns
+    # original columns should match previous results
+    assert np.allclose(Xd3[:, :2], Xd2)
+    assert Xd3.shape[1] == 3
 
 
 @pytest.mark.parametrize(
@@ -279,26 +276,23 @@ def test_demean_model_maxiter_convergence_failure(demean_func):
     N = 100
     rng = np.random.default_rng(42)
 
-    Y = pd.DataFrame({"y": rng.normal(0, 1, N)})
-    X = pd.DataFrame({"x1": rng.normal(0, 1, N)})
-    # Many fixed effects to make convergence difficult
-    fe = pd.DataFrame(
-        {"fe1": rng.choice(N // 10, N), "fe2": rng.choice(N // 10, N)}
-    )  # Each obs is its own FE
+    Y = rng.normal(0, 1, (N, 1))
+    X = rng.normal(0, 1, (N, 1))
+    fe = np.column_stack([rng.choice(N // 10, N), rng.choice(N // 10, N)])
     weights = np.ones(N)
-    lookup_dict = {}
 
-    # Should fail with very small maxiter
     with pytest.raises(ValueError, match="Demeaning failed after 1 iterations"):
         demean_model(
             Y=Y,
             X=X,
+            y_names=["y"],
+            x_names=["x1"],
             fe=fe,
             weights=weights,
-            lookup_demeaned_data=lookup_dict,
+            lookup_demeaned_data={},
             na_index=frozenset(),
             fixef_tol=1e-6,
-            fixef_maxiter=1,  # Very small limit
+            fixef_maxiter=1,
             demean_func=demean_func,
         )
 
@@ -313,28 +307,27 @@ def test_demean_model_custom_maxiter_success(demean_func):
     N = 1000
     rng = np.random.default_rng(42)
 
-    Y = pd.DataFrame({"y": rng.normal(0, 1, N)})
-    X = pd.DataFrame({"x1": rng.normal(0, 1, N)})
-    fe = pd.DataFrame({"fe1": rng.integers(0, 10, N)})
+    Y = rng.normal(0, 1, (N, 1))
+    X = rng.normal(0, 1, (N, 1))
+    fe = rng.integers(0, 10, (N, 1))
     weights = np.ones(N)
-    lookup_dict = {}
 
-    # Should succeed with reasonable maxiter
     Yd, Xd = demean_model(
         Y=Y,
         X=X,
+        y_names=["y"],
+        x_names=["x1"],
         fe=fe,
         weights=weights,
-        lookup_demeaned_data=lookup_dict,
+        lookup_demeaned_data={},
         na_index=frozenset(),
         fixef_tol=1e-6,
-        fixef_maxiter=5000,  # Custom limit
+        fixef_maxiter=5000,
         demean_func=demean_func,
     )
 
-    # Just verify it returns valid results
-    assert isinstance(Yd, pd.DataFrame)
-    assert isinstance(Xd, pd.DataFrame)
+    assert isinstance(Yd, np.ndarray)
+    assert isinstance(Xd, np.ndarray)
     assert Yd.shape == Y.shape
     assert Xd.shape == X.shape
 
@@ -344,41 +337,35 @@ def test_demean_maxiter_parameter():
     N = 100
     rng = np.random.default_rng(42)
 
-    # Create data that's hard to converge
     x = rng.normal(0, 1, N * 2).reshape((N, 2))
-    flist = np.arange(N).reshape((N, 1)).astype(np.uint)  # Many FEs
+    flist = np.arange(N).reshape((N, 1)).astype(np.uint)
     weights = np.ones(N)
 
-    # Test with very small maxiter
     _, success = demean(x, flist, weights, tol=1e-10, maxiter=1)
-    assert not success  # Should fail to converge
+    assert not success
 
-    # Test with large maxiter
     _, success = demean(x, flist, weights, tol=1e-10, maxiter=100_000)
-    # May or may not converge, but shouldn't crash
+    # may or may not converge, but should not crash
 
 
 def test_feols_integration_maxiter():
     """Integration test: Test fixef_maxiter flows from feols to demean."""
     import pyfixest as pf
 
-    N = 1000  # More observations
+    N = 1000
     rng = np.random.default_rng(42)
 
-    # Create data with many (but not N) fixed effects
     data = pd.DataFrame(
         {
             "y": rng.normal(0, 1, N),
             "x": rng.normal(0, 1, N),
-            "fe": rng.integers(0, 50, N),  # 50 fixed effects, not N
+            "fe": rng.integers(0, 50, N),
         }
     )
 
-    # Should fail with tiny maxiter
     with pytest.raises(ValueError, match="Demeaning failed after 1 iterations"):
         pf.feols("y ~ x | fe", data=data, fixef_maxiter=1)
 
-    # Should work with default
     model = pf.feols("y ~ x | fe", data=data)
     assert model is not None
 
@@ -416,12 +403,10 @@ def generate_complex_fixed_effects_data():
     nb_indiv = n // 20
     nb_firm = max(1, round(n / 160))
     nb_year = max(1, round(n**0.3))
-    # Generate fixed effect IDs
     id_indiv = rng.choice(nb_indiv, n, replace=True)
     id_firm_base = rng.integers(0, 21, n) + np.maximum(1, id_indiv // 8 - 10)
     id_firm = np.minimum(id_firm_base, nb_firm - 1)
     id_year = rng.choice(nb_year, n, replace=True)
-    # Create variables
     x1 = (
         5 * np.cos(id_indiv)
         + 5 * np.sin(id_firm)

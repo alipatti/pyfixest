@@ -1,25 +1,25 @@
 from collections.abc import Callable
-from typing import Any
 
 import numba as nb
 import numpy as np
-import pandas as pd
 
 from pyfixest.estimation.internals.literals import DemeanerBackendOptions
 
 
 def demean_model(
-    Y: pd.DataFrame,
-    X: pd.DataFrame,
-    fe: pd.DataFrame | None,
+    Y: np.ndarray,
+    X: np.ndarray,
+    # TODO: make sure we really need to pass names here -- is there another way to get the cache hit?
+    y_names: list[str],
+    x_names: list[str],
+    fe: np.ndarray | None,
     weights: np.ndarray | None,
-    lookup_demeaned_data: dict[frozenset[int], Any],
+    lookup_demeaned_data: dict[frozenset[int], dict[str, np.ndarray]],
     na_index: frozenset[int],
     fixef_tol: float,
     fixef_maxiter: int,
     demean_func: Callable,
-    # demeaner_backend: Literal["numba", "jax", "rust"] = "numba",
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[np.ndarray, np.ndarray]:
     """
     Demean a regression model.
 
@@ -31,136 +31,89 @@ def demean_model(
 
     Parameters
     ----------
-    Y : pandas.DataFrame
-        A DataFrame of the dependent variable.
-    X : pandas.DataFrame
-        A DataFrame of the covariates.
-    fe : pandas.DataFrame or None
-        A DataFrame of the fixed effects. None if no fixed effects specified.
+    Y : np.ndarray
+        2D array of the dependent variable, shape (N, 1).
+    X : np.ndarray
+        2D array of the covariates, shape (N, k).
+    y_names : list[str]
+        Column names for Y, used as cache keys.
+    x_names : list[str]
+        Column names for X, used as cache keys.
+    fe : np.ndarray or None
+        2D integer array of fixed effects, shape (N, n_fe). None if no fixed effects.
     weights : numpy.ndarray or None
         A numpy array of weights. None if no weights.
-    lookup_demeaned_data : dict[str, Any]
-        A dictionary with keys for each fixed effects combination and potentially
-        values of demeaned data frames. The function checks this dictionary to
-        see if some of the variables have already been demeaned.
+    lookup_demeaned_data : dict[frozenset[int], dict[str, np.ndarray]]
+        Cache mapping na_index to {col_name: demeaned_column}. Checked to avoid
+        redundant demeaning across multiple models sharing the same fixed effects.
     na_index : frozenset[int]
-        A frozenset of indices of dropped rows. Used as a hashable cache key
-        for demeaned variables.
+        Indices of dropped rows, used as a hashable cache key.
     fixef_tol: float
         The tolerance for the demeaning algorithm.
     fixef_maxiter: int
-         The maximum number of iterations for the demeaning algorithm.
-    demeaner_backend: DemeanerBackendOptions, optional
-        The backend to use for demeaning. Can be either "numba", "jax", or "rust".
-        Defaults to "numba".
-
+        The maximum number of iterations for the demeaning algorithm.
+    demean_func : Callable
+        The demeaning backend function.
 
     Returns
     -------
-    tuple[pd.DataFrame, pd.DataFrame, Optional[pd.DataFrame]]
-        A tuple of the following elements:
-        - Yd : pd.DataFrame
-            A DataFrame of the demeaned dependent variable.
-        - Xd : pd.DataFrame
-            A DataFrame of the demeaned covariates.
-        - Id : pd.DataFrame or None
-            A DataFrame of the demeaned Instruments. None if no IV.
+    tuple[np.ndarray, np.ndarray]
+        Demeaned (Yd, Xd) arrays.
     """
-    YX = pd.concat([Y, X], axis=1)
+    if fe is None:
+        # no demeaning to do, return early
+        return Y, X
 
-    yx_names = YX.columns
-    YX_array = YX.to_numpy()
-
-    if YX_array.dtype != np.dtype("float64"):
-        YX_array = YX_array.astype(np.float64)
+    yx_names = y_names + x_names
+    YX = np.column_stack([Y, X]).astype(np.float64, copy=False)
 
     if weights is not None and weights.ndim > 1:
         weights = weights.flatten()
 
-    if fe is not None:
-        fe_array = fe.to_numpy()
-        # check if looked dict has data for na_index
-        if lookup_demeaned_data.get(na_index) is not None:
-            # get data out of lookup table: list of [algo, data]
-            value = lookup_demeaned_data.get(na_index)
-            if value is not None:
-                try:
-                    _, YX_demeaned_old = value
-                except ValueError:
-                    print("Error: Expected the value to be iterable with two elements.")
-            else:
-                pass
+    # TODO: make this a default dict so that we can get rid of the first branch
+    cache = lookup_demeaned_data.get(na_index)
 
-            # get not yet demeaned covariates
-            var_diff_names = list(set(yx_names) - set(YX_demeaned_old.columns))
+    if cache is None:
+        # no cache, so demean everything
 
-            # if some variables still need to be demeaned
-            if var_diff_names:
-                # var_diff_names = var_diff_names
+        YX_demeaned, success = demean_func(
+            x=YX,
+            flist=fe.astype(np.uintp),
+            weights=weights,
+            tol=fixef_tol,
+            maxiter=fixef_maxiter,
+        )
+        if not success:
+            raise ValueError(f"Demeaning failed after {fixef_maxiter} iterations.")
 
-                yx_names_list = list(yx_names)
-                var_diff_index = [yx_names_list.index(item) for item in var_diff_names]
-                # var_diff_index = list(yx_names).index(var_diff_names)
-                var_diff = YX_array[:, var_diff_index]
-                if var_diff.ndim == 1:
-                    var_diff = var_diff.reshape(len(var_diff), 1)
+        cache = {name: YX_demeaned[:, i] for i, name in enumerate(yx_names)}
+        lookup_demeaned_data[na_index] = cache
 
-                YX_demean_new, success = demean_func(
-                    x=var_diff,
-                    flist=fe_array.astype(np.uintp),
-                    weights=weights,
-                    tol=fixef_tol,
-                    maxiter=fixef_maxiter,
-                )
-                if success is False:
-                    raise ValueError(
-                        f"Demeaning failed after {fixef_maxiter} iterations."
-                    )
+    elif missing := [n for n in yx_names if n not in cache]:
+        # there is a cache, but it's missing some entries
 
-                YX_demeaned = pd.DataFrame(
-                    np.concatenate([YX_demeaned_old, YX_demean_new], axis=1)
-                )
+        missing_idx = [yx_names.index(n) for n in missing]
+        var_diff = YX[:, missing_idx]
+        if var_diff.ndim == 1:
+            var_diff = var_diff.reshape(-1, 1)
 
-                # check if var_diff_names is a list
-                if isinstance(var_diff_names, str):
-                    var_diff_names = [var_diff_names]
+        demeaned_new, success = demean_func(
+            x=var_diff,
+            flist=fe.astype(np.uintp),
+            weights=weights,
+            tol=fixef_tol,
+            maxiter=fixef_maxiter,
+        )
+        if not success:
+            raise ValueError(f"Demeaning failed after {fixef_maxiter} iterations.")
 
-                YX_demeaned.columns = pd.Index(
-                    list(YX_demeaned_old.columns) + var_diff_names
-                )
+        for i, name in enumerate(missing):
+            cache[name] = demeaned_new[:, i]
 
-            else:
-                # all variables already demeaned
-                YX_demeaned = YX_demeaned_old[yx_names]
+    # cache is now populated -- pull from it
+    YX_demeaned = np.column_stack([cache[n] for n in yx_names])
 
-        else:
-            YX_demeaned, success = demean_func(
-                x=YX_array,
-                flist=fe_array.astype(np.uintp),
-                weights=weights,
-                tol=fixef_tol,
-                maxiter=fixef_maxiter,
-            )
-            if success is False:
-                raise ValueError(f"Demeaning failed after {fixef_maxiter} iterations.")
-
-            YX_demeaned = pd.DataFrame(YX_demeaned)
-            YX_demeaned.columns = yx_names
-
-        lookup_demeaned_data[na_index] = [None, YX_demeaned]
-
-    else:
-        # nothing to demean here
-        pass
-
-        YX_demeaned = pd.DataFrame(YX_array)
-        YX_demeaned.columns = yx_names
-
-    # get demeaned Y, X (if no fixef, equal to Y, X, I)
-    Yd = YX_demeaned[Y.columns]
-    Xd = YX_demeaned[X.columns]
-
-    return Yd, Xd
+    return YX_demeaned[:, :1], YX_demeaned[:, 1:]
 
 
 @nb.njit
