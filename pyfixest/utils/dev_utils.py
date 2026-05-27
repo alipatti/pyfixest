@@ -1,6 +1,6 @@
 import re
 
-import narwhals.stable.v1 as nw
+import narwhals.stable.v2 as nw
 import numpy as np
 import pandas as pd
 from narwhals.typing import IntoDataFrame
@@ -9,7 +9,7 @@ DataFrameType = IntoDataFrame
 
 
 def _narwhals_to_pandas(data: IntoDataFrame) -> pd.DataFrame:  # type: ignore
-    return nw.from_native(data, eager_or_interchange_only=True).to_pandas()
+    return nw.from_native(data, eager_only=True).to_pandas()
 
 
 def _create_rng(seed: int | None = None) -> np.random.Generator:

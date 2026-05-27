@@ -3,10 +3,10 @@ from collections.abc import Mapping
 from importlib import import_module
 from typing import Any
 
-import narwhals.stable.v1 as nw
+import narwhals.stable.v2 as nw
 import numpy as np
 import pandas as pd  # TODO: can we defer this import until we need it?
-from narwhals.stable.v1.typing import IntoDataFrame
+from narwhals.stable.v2.typing import IntoDataFrame
 
 from pyfixest.estimation.api.utils import _ALL_SAMPLE, _AllSampleSentinel
 from pyfixest.estimation.formula.parse import Formula
@@ -135,7 +135,11 @@ class FixestMulti:
         if isinstance(data, pd.DataFrame):
             data.reset_index(drop=True, inplace=True)
 
-        self._data = nw.from_native(data)
+        narwhals_df = nw.from_native(data, allow_series=False, eager_only=False)
+        if isinstance(narwhals_df, nw.LazyFrame):
+            self._data = narwhals_df.collect()
+        else:
+            self._data = narwhals_df
 
         self.all_fitted_models: dict[str, Feols | Fepois | Feiv] = {}
 

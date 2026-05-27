@@ -1,11 +1,10 @@
-import narwhals.stable.v1 as nw
-
-from pyfixest.utils.dev_utils import DataFrameType
+import narwhals.stable.v2 as nw
+from narwhals.stable.v2.typing import IntoDataFrame
 
 
 def _estimation_input_checks(
     fml: str,
-    data: DataFrameType,
+    data: IntoDataFrame,
     vcov: str | dict[str, str] | None,
     vcov_kwargs: dict[str, str | int] | None,
     weights: None | str,
@@ -25,7 +24,8 @@ def _estimation_input_checks(
     fsplit: str | None,
     separation_check: list[str] | None = None,
 ):
-    data = nw.from_native(data, eager_or_interchange_only=True)
+    columns = nw.from_native(data).columns
+    
 
     if not isinstance(fml, str):
         raise TypeError("fml must be a string")
@@ -48,7 +48,7 @@ def _estimation_input_checks(
             f"weights must be a string or None but you provided weights = {weights}."
         )
     if weights is not None:
-        assert weights in data.columns, "weights must be a column in data"
+        assert weights in columns, "weights must be a column in data"
 
     bool_args = [copy_data, store_data, lean]
     for arg in bool_args:
@@ -130,10 +130,10 @@ def _estimation_input_checks(
                         """
         )
 
-    if isinstance(split, str) and split not in data.columns:
+    if isinstance(split, str) and split not in columns:
         raise KeyError(f"Column '{split}' not found in data.")
 
-    if isinstance(fsplit, str) and fsplit not in data.columns:
+    if isinstance(fsplit, str) and fsplit not in columns:
         raise KeyError(f"Column '{fsplit}' not found in data.")
 
     if separation_check is not None:
@@ -165,7 +165,7 @@ def _estimation_input_checks(
                 raise ValueError(
                     "The function argument `vcov_kwargs` must be a dictionary with string values for 'time_id' if explicitly provided."
                 )
-            if vcov_kwargs["time_id"] not in data.columns:
+            if vcov_kwargs["time_id"] not in columns:
                 raise ValueError(
                     f"The variable '{vcov_kwargs['time_id']}' is not in the data."
                 )
@@ -175,7 +175,7 @@ def _estimation_input_checks(
                 raise ValueError(
                     "The function argument `vcov_kwargs` must be a dictionary with string values for 'panel_id' if explicitly provided."
                 )
-            if vcov_kwargs["panel_id"] not in data.columns:
+            if vcov_kwargs["panel_id"] not in columns:
                 raise ValueError(
                     f"The variable '{vcov_kwargs['panel_id']}' is not in the data."
                 )

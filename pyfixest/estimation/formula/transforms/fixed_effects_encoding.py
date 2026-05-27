@@ -2,11 +2,11 @@ import functools
 import itertools
 from typing import Final
 
-import narwhals.stable.v1 as nw
+import narwhals.stable.v2 as nw
 from formulaic.parser import DefaultOperatorResolver
 from formulaic.parser.types import Operator, OrderedSet
 from formulaic.utils.stateful_transforms import stateful_transform
-from narwhals.stable.v1.typing import IntoSeriesT
+from narwhals.stable.v2.typing import IntoSeriesT
 
 
 @stateful_transform
