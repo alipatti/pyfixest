@@ -1,6 +1,6 @@
 import duckdb
+import narwhals.stable.v1 as nw
 import numpy as np
-import pandas as pd
 import pytest
 from formulaic.errors import FactorEvaluationError
 
@@ -111,9 +111,9 @@ def test_duckdb_input():
     np.testing.assert_allclose(fit_pandas.se(), fit_duckdb.se(), rtol=1e-12)
 
 
-def _lspline(series: pd.Series, knots: list[float]) -> np.array:
+def _lspline(series: nw.Series, knots: list[float]) -> np.array:
     """Generate a linear spline design matrix for the input series based on knots."""
-    vector = series.values
+    vector = series.to_numpy()
     columns = []
 
     for i, knot in enumerate(knots):
@@ -133,7 +133,7 @@ def spline_data():
     """Fixture to prepare data with spline splits."""
     data = pf.get_data()
     data["Y"] = np.where(data["Y"] > data["Y"].median(), 1, 0)
-    spline_split = _lspline(data["X2"], [0, 1])
+    spline_split = _lspline(nw.from_native(data["X2"], series_only=True), [0, 1])
     data["X2_0"], data["0_X2_1"], data["1_X2"] = spline_split.T
     return data
 

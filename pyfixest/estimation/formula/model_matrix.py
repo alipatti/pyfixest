@@ -2,13 +2,13 @@ import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import reduce
-from typing import Any, Generic, cast
+from typing import Any, cast
 
 import formulaic
 import narwhals as nw
 from formulaic.parser import DefaultFormulaParser
 from formulaic.utils.structured import Structured
-from narwhals.typing import IntoDataFrame, IntoDataFrameT
+from narwhals.typing import IntoDataFrame
 
 from pyfixest.core.detect_singletons import detect_singletons
 from pyfixest.estimation.formula import FORMULAIC_FEATURE_FLAG, FORMULAIC_TRANSFORMS
@@ -24,10 +24,10 @@ class _ModelMatrixKey:
     weights: str = "weights"
 
 
-MM = Structured[formulaic.ModelMatrix[IntoDataFrameT]]
+MM = Structured[formulaic.ModelMatrix[Any]]
 
 
-class ModelMatrix(Generic[IntoDataFrameT]):
+class ModelMatrix:
     """
     A wrapper around formulaic.ModelMatrix for the specification of PyFixest models.
 
@@ -38,17 +38,17 @@ class ModelMatrix(Generic[IntoDataFrameT]):
 
     Attributes
     ----------
-    dependent : IntoDataFrameT
+    dependent : nw.DataFrame
         The dependent variable(s) (left-hand side of the main equation).
-    independent : IntoDataFrameT
+    independent : nw.DataFrame
         The independent variable(s) (right-hand side of the main equation).
-    fixed_effects : IntoDataFrameT or None
+    fixed_effects : nw.DataFrame or None
         Fixed effects variables, encoded as integers.
-    endogenous : IntoDataFrameT or None
+    endogenous : nw.DataFrame or None
         Endogenous variables in instrumental variable specifications.
-    instruments : IntoDataFrameT or None
+    instruments : nw.DataFrame or None
         Instrumental variables for IV estimation.
-    weights : IntoDataFrameT or None
+    weights : nw.DataFrame or None
         Observation weights for weighted estimation.
     model_spec : formulaic.ModelSpec
         The underlying formulaic model specification.
@@ -56,12 +56,12 @@ class ModelMatrix(Generic[IntoDataFrameT]):
         Indices of rows that were dropped.
     """
 
-    _data: IntoDataFrameT
+    _data: nw.DataFrame
 
     def __init__(
         self,
-        model_matrix: MM[IntoDataFrameT],
-        data: IntoDataFrameT,
+        model_matrix: MM,
+        data: nw.DataFrame,
         drop_singletons: bool = True,
         drop_intercept: bool = False,
     ) -> None:
@@ -75,7 +75,7 @@ class ModelMatrix(Generic[IntoDataFrameT]):
         self._process(data=data, drop_singletons=drop_singletons)
 
     @staticmethod
-    def _get_columns(mm: MM[IntoDataFrameT], *keys: str) -> list[str] | None:
+    def _get_columns(mm: MM, *keys: str) -> list[str] | None:
         """Extract column names by traversing nested keys, or None if missing."""
         try:
             result = mm
@@ -83,13 +83,13 @@ class ModelMatrix(Generic[IntoDataFrameT]):
                 result = result[k]  # type: ignore
 
             assert nw.dependencies.is_into_dataframe(result)
-            result = cast(IntoDataFrameT, result)
+            result = cast(IntoDataFrame, result)
 
             return nw.from_native(result).columns
         except KeyError:
             return None
 
-    def _collect_columns(self, model_matrix: MM[IntoDataFrameT]) -> None:
+    def _collect_columns(self, model_matrix: MM) -> None:
         self._dependent = self._get_columns(model_matrix, _ModelMatrixKey.main, "lhs")
         self._independent = self._get_columns(model_matrix, _ModelMatrixKey.main, "rhs")
         self._fixed_effects = self._get_columns(
@@ -103,7 +103,7 @@ class ModelMatrix(Generic[IntoDataFrameT]):
         )
         self._weights = self._get_columns(model_matrix, _ModelMatrixKey.weights)
 
-    def _collect_data(self, model_matrix: MM[IntoDataFrameT]) -> None:
+    def _collect_data(self, model_matrix: MM) -> None:
 
         def _combine(df1: nw.DataFrame, df2: nw.DataFrame) -> nw.DataFrame:
             new_columns = set(df2.columns) - set(df1.columns)
@@ -124,9 +124,9 @@ class ModelMatrix(Generic[IntoDataFrameT]):
         self._data = reduce(
             _combine,
             (nw.from_native(df) for df in model_matrix._flatten()),  # type: ignore
-        ).to_native()
+        )
 
-    def _process(self, data: IntoDataFrameT, drop_singletons: bool = False) -> None:
+    def _process(self, data: IntoDataFrame, drop_singletons: bool = False) -> None:
         """Validate, clean, and finalize the collected model matrix data.
 
         Adds a sequential row index, then drops rows with null values in any
@@ -142,7 +142,7 @@ class ModelMatrix(Generic[IntoDataFrameT]):
 
         Parameters
         ----------
-        data : IntoDataFrameT
+        data : nw.DataFrame
             The original input data, used to detect null values in
             formula-referenced columns before any encoding is applied.
         drop_singletons : bool, default False
@@ -158,19 +158,16 @@ class ModelMatrix(Generic[IntoDataFrameT]):
         """
         # TODO: revisit this implementation (currently quite cludgy and probably slow)
 
-        if nw.from_native(self.dependent).shape[1] != 1:
-            # If the dependent variable is not numeric, formulaic's contrast encoding kicks in
+        if self.dependent.shape[1] != 1:
+            # if the dependent variable is not numeric, formulaic's contrast encoding kicks in
             # creating multiple columns for the dependent variable
             # TODO: Make this check more explicit?
             raise TypeError("The dependent variable must be numeric.")
 
-        if (
-            self.endogenous is not None
-            and nw.from_native(self.endogenous).shape[1] != 1
-        ):
+        if self.endogenous is not None and self.endogenous.shape[1] != 1:
             raise TypeError("The endogenous variable must be numeric.")
 
-        df = nw.from_native(self._data).with_row_index("__row_index__")
+        df = self._data.with_row_index("__row_index__")
         n = df.shape[0]
         backend = nw.get_native_namespace(df)
 
@@ -239,62 +236,62 @@ class ModelMatrix(Generic[IntoDataFrameT]):
                     f"{n_singleton} singleton fixed effect(s) dropped from the model."
                 )
 
-        self._data = df.drop("__row_index__").to_native()
+        self._data = df.drop("__row_index__")
         self._na_index = frozenset(range(n)) - frozenset(df["__row_index__"])
 
     @property
-    def dependent(self) -> IntoDataFrameT:
+    def dependent(self) -> nw.DataFrame:
         """
         Get the dependent variable(s) from the model.
 
         Returns
         -------
-        IntoDataFrameT
+        nw.DataFrame
             DataFrame containing the dependent variable(s) (left-hand side
             of the main equation).
         """
         cols = self._dependent or []
-        return nw.from_native(self._data).select(cols).to_native()
+        return self._data.select(cols)
 
     @property
-    def independent(self) -> IntoDataFrameT:
+    def independent(self) -> nw.DataFrame:
         """
         Get the independent variable(s) from the model.
 
         Returns
         -------
-        IntoDataFrameT
+        nw.DataFrame
             DataFrame containing the independent variable(s) (right-hand side
             of the main equation). Intercept columns are excluded when fixed
             effects are present.
         """
         cols = self._independent or []
-        return nw.from_native(self._data).select(cols).to_native()
+        return self._data.select(cols)
 
     @property
-    def fixed_effects(self) -> IntoDataFrameT | None:
+    def fixed_effects(self) -> nw.DataFrame | None:
         """
         Get the fixed effects variables from the model.
 
         Returns
         -------
-        IntoDataFrameT or None
+        nw.DataFrame or None
             DataFrame containing the fixed effects variables encoded as integers,
             or None if no fixed effects are specified in the model.
         """
         if self._fixed_effects is None:
             return None
 
-        return nw.from_native(self._data).select(self._fixed_effects).to_native()
+        return self._data.select(self._fixed_effects)
 
     @property
-    def endogenous(self) -> IntoDataFrameT | None:
+    def endogenous(self) -> nw.DataFrame | None:
         """
         Get the endogenous variable(s) for instrumental variable estimation.
 
         Returns
         -------
-        IntoDataFrameT or None
+        nw.DataFrame or None
             DataFrame containing the endogenous variable(s) (left-hand side
             of the first-stage equation in IV estimation), or None if not
             using instrumental variables.
@@ -302,16 +299,16 @@ class ModelMatrix(Generic[IntoDataFrameT]):
         if self._endogenous is None:
             return None
 
-        return nw.from_native(self._data).select(self._endogenous).to_native()
+        return self._data.select(self._endogenous)
 
     @property
-    def instruments(self) -> IntoDataFrameT | None:
+    def instruments(self) -> nw.DataFrame | None:
         """
         Get the instrumental variable(s) for IV estimation.
 
         Returns
         -------
-        IntoDataFrameT or None
+        nw.DataFrame or None
             DataFrame containing the instrumental variable(s) (right-hand side
             of the first-stage equation in IV estimation), or None if not
             using instrumental variables. Intercept columns are excluded when
@@ -320,23 +317,23 @@ class ModelMatrix(Generic[IntoDataFrameT]):
         if self._instruments is None:
             return None
 
-        return nw.from_native(self._data).select(self._instruments).to_native()
+        return self._data.select(self._instruments)
 
     @property
-    def weights(self) -> IntoDataFrameT | None:
+    def weights(self) -> nw.DataFrame | None:
         """
         Get the observation weights for weighted estimation.
 
         Returns
         -------
-        IntoDataFrameT or None
+        nw.DataFrame or None
             DataFrame containing the observation weights (must be non-negative
             numeric values), or None if no weights are specified.
         """
         if self._weights is None:
             return None
 
-        return nw.from_native(self._data).select(self._weights).to_native()
+        return self._data.select(self._weights)
 
     @property
     def model_spec(self) -> formulaic.ModelSpec:
@@ -359,13 +356,13 @@ class ModelMatrix(Generic[IntoDataFrameT]):
 
 def create_model_matrix(
     formula: Formula,
-    data: IntoDataFrameT,
+    data: nw.DataFrame,
     weights: str | None = None,
     drop_singletons: bool = False,
     drop_intercept: bool = False,
     ensure_full_rank: bool = True,
     context: int | Mapping[str, Any] = 0,
-) -> ModelMatrix[IntoDataFrameT]:
+) -> ModelMatrix:
     """
     Create a ModelMatrix from a formula and data.
 
@@ -378,7 +375,7 @@ def create_model_matrix(
     formula : Formula
         A Formula object specifying the model structure, including dependent and
         independent variables, fixed effects, and instrumental variables.
-    data : IntoDataFrameT
+    data : nw.DataFrame
         The input data containing all variables referenced in the formula.
     weights : str or None, default=None
         Column name in data to use as observation weights. Weights must be
@@ -411,7 +408,7 @@ def create_model_matrix(
     )
 
     model_matrix = cast(
-        Structured[formulaic.ModelMatrix[IntoDataFrameT]],
+        MM,
         formula_formulaic.get_model_matrix(
             data=data,
             ensure_full_rank=ensure_full_rank,

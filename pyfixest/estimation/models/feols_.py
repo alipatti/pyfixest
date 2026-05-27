@@ -247,7 +247,7 @@ class Feols(ResultAccessorMixin):
     def __init__(
         self,
         FixestFormula: FixestFormula,
-        data: pd.DataFrame,
+        data: nw.DataFrame,
         ssc_dict: dict[str, str | bool],
         drop_singletons: bool,
         drop_intercept: bool,
@@ -256,7 +256,8 @@ class Feols(ResultAccessorMixin):
         collin_tol: float,
         fixef_tol: float,
         fixef_maxiter: int,
-        lookup_demeaned_data: dict[frozenset[int], pd.DataFrame],
+        # TODO: make dict[...] a type constant
+        lookup_demeaned_data: dict[frozenset[int], dict[str, np.ndarray]],
         solver: SolverOptions = "np.linalg.solve",
         demeaner_backend: DemeanerBackendOptions = "numba",
         store_data: bool = True,
@@ -281,15 +282,14 @@ class Feols(ResultAccessorMixin):
         if self._sample_split_var is None:
             pass
 
-        # TODO: use narwhals here
         elif self._sample_split_value is _ALL_SAMPLE:
-            data = data.loc[data[sample_split_var].notnull()]
+            assert self._sample_split_var is not None
+            data = data.filter(~nw.col(self._sample_split_var).is_null())
         else:
-            data = data.loc[data[self._sample_split_var] == sample_split_value]
+            assert self._sample_split_var is not None
+            data = data.filter(nw.col(self._sample_split_var) == sample_split_value)
 
-        data = data.reset_index(drop=True)
-
-        self._data = data.copy() if copy_data else data
+        self._data = data
         self._ssc_dict = ssc_dict
         self._drop_singletons = drop_singletons
         self._drop_intercept = drop_intercept
@@ -416,35 +416,38 @@ class Feols(ResultAccessorMixin):
             context=self._context,
         )
 
-        # extract column names before converting to numpy
-        dep_frame = nw.from_native(model_matrix.dependent)
-        indep_frame = nw.from_native(model_matrix.independent)
+        dep_frame = model_matrix.dependent
+        indep_frame = model_matrix.independent
         y_names = dep_frame.columns
         x_names = indep_frame.columns
 
+        n_rows = dep_frame.shape[0]
         dep_arr = dep_frame.to_numpy()
         self._Y = dep_arr
         self._Y_untransformed = dep_arr.copy()
-        self._X = indep_frame.to_numpy()
+        # narwhals select([]) returns (0, 0) shape, so preserve n_rows for empty X
+        self._X = (
+            indep_frame.to_numpy()
+            if indep_frame.shape[1] > 0
+            else np.zeros((n_rows, 0), dtype=float)
+        )
 
-        if (fe_native := model_matrix.fixed_effects) is not None:
-            fe_frame = nw.from_native(fe_native)
+        if (fe_frame := model_matrix.fixed_effects) is not None:
             self._fe_colnames: list[str] | None = list(fe_frame.columns)
             self._fe: np.ndarray | None = fe_frame.to_numpy()
         else:
             self._fe_colnames = None
             self._fe = None
 
-        if model_matrix.endogenous is not None:
-            endogvar_frame = nw.from_native(model_matrix.endogenous)
+        if (endogvar_frame := model_matrix.endogenous) is not None:
             self._endogvar_names: list[str] | None = list(endogvar_frame.columns)
             self._endogvar: np.ndarray | None = endogvar_frame.to_numpy()
         else:
             self._endogvar_names = None
             self._endogvar = None
 
-        if model_matrix.instruments is not None:
-            self._Z: np.ndarray | None = nw.from_native(model_matrix.instruments).to_numpy()
+        if (instruments_frame := model_matrix.instruments) is not None:
+            self._Z: np.ndarray | None = instruments_frame.to_numpy()
         else:
             self._Z = None
 
@@ -460,12 +463,12 @@ class Feols(ResultAccessorMixin):
             if is_icovar is not None and any(is_icovar)
             else None
         )
-        self._X_is_empty = not (self._X.shape[0] > 0)
+        self._X_is_empty = self._X.shape[1] == 0
         self._model_spec = model_matrix.model_spec
 
         self._coefnames = list(x_names)
         self._coefnames_z = (
-            list(nw.from_native(model_matrix.instruments).columns)
+            list(model_matrix.instruments.columns)
             if model_matrix.instruments is not None
             else None
         )
@@ -487,11 +490,14 @@ class Feols(ResultAccessorMixin):
             self._k_fe = None
         self._n_fe = len(self._k_fe) if self._has_fixef else 0
 
-        # update data
-        self._data.drop(
-            self._data.index[~self._data.index.isin(model_matrix.dependent.index)],
-            inplace=True,
-        )
+        # drop rows that were excluded during model matrix creation
+        if model_matrix.na_index:
+            valid = sorted(frozenset(range(len(self._data))) - model_matrix.na_index)
+            self._data = (
+                self._data.with_row_index("__row_index__")
+                .filter(nw.col("__row_index__").is_in(valid))
+                .drop("__row_index__")
+            )
 
         self._weights = self._set_weights()
         self._N, self._N_rows = self._set_nobs()
@@ -648,6 +654,7 @@ class Feols(ResultAccessorMixin):
 
         data_to_check = data if data is not None else self._data
         try:
+            # TODO: narwhalify _check_vcov_input
             data_to_check = _narwhals_to_pandas(data_to_check)
         except TypeError as e:
             raise TypeError(
@@ -726,9 +733,9 @@ class Feols(ResultAccessorMixin):
                 "n_fe_fully_nested": 0,  # nesting ignored / irrelevant for HAC SEs
                 "vcov_sign": 1,
                 "vcov_type": "HAC",
-                "G": np.unique(self._data[self._time_id]).shape[
-                    0
-                ],  # number of unique time periods T used
+                "G": np.unique(
+                    self._data.get_column(cast(str, self._time_id)).to_numpy()
+                ).shape[0],  # number of unique time periods T used
             }
 
             all_kwargs = {**ssc_kwargs, **ssc_kwargs_hac}
@@ -752,17 +759,22 @@ class Feols(ResultAccessorMixin):
         elif self._vcov_type == "CRV":
             if data is not None:
                 # use input data set
+                # TODO: narwhalify _get_cluster_df and _check_cluster_df
                 self._cluster_df = _get_cluster_df(
-                    data=data,
+                    data=_narwhals_to_pandas(data),
                     clustervar=self._clustervar,
                 )
-                _check_cluster_df(cluster_df=self._cluster_df, data=data)
+                _check_cluster_df(
+                    cluster_df=self._cluster_df, data=_narwhals_to_pandas(data)
+                )
             else:
                 # use stored data
                 self._cluster_df = _get_cluster_df(
-                    data=self._data, clustervar=self._clustervar
+                    data=_narwhals_to_pandas(self._data), clustervar=self._clustervar
                 )
-                _check_cluster_df(cluster_df=self._cluster_df, data=self._data)
+                _check_cluster_df(
+                    cluster_df=self._cluster_df, data=_narwhals_to_pandas(self._data)
+                )
 
             if self._cluster_df.shape[1] > 1:
                 self._cluster_df = _prepare_twoway_clustering(
@@ -900,14 +912,14 @@ class Feols(ResultAccessorMixin):
         _time_id = self._time_id
         _panel_id = self._panel_id
         _lag = self._lag
-        _data = self._data
+        # TODO: narwhalify _vcov_hac
+        _data = _narwhals_to_pandas(self._data)
 
         if not self._support_hac_inference:
             raise NotImplementedError(
                 "HAC inference is not supported for this model type."
             )
 
-        # some data checks on input pandas df
         # time needs to be numeric or date else we cannot sort by time
         if not np.issubdtype(_data[_time_id], np.number) and not np.issubdtype(
             _data[_time_id], np.datetime64
@@ -1034,7 +1046,8 @@ class Feols(ResultAccessorMixin):
 
         for ixg, g in enumerate(clustid):
             # direct leave one cluster out implementation
-            data = self._data[~np.equal(g, cluster_col)]
+            # TODO: narwhalify _vcov_crv3_slow (pass narwhals df to feols)
+            data = _narwhals_to_pandas(self._data)[~np.equal(g, cluster_col)]
             fit = fit_(
                 fml=self._fml,
                 data=data,
@@ -1062,8 +1075,8 @@ class Feols(ResultAccessorMixin):
     def add_fixest_multi_context(
         self,
         depvar: str,
-        Y: pd.Series,
-        _data: pd.DataFrame,
+        Y: np.ndarray,
+        _data: nw.DataFrame,
         _ssc_dict: dict[str, str | bool],
         _k_fe: int,
         fval: str,
@@ -1081,9 +1094,9 @@ class Feols(ResultAccessorMixin):
             The formula(s) used for estimation encoded in a `FixestFormula` object.
         depvar : str
             The dependent variable of the regression model.
-        Y : pd.Series
+        Y : np.ndarray
             The dependent variable of the regression model.
-        _data : pd.DataFrame
+        _data : nw.DataFrame
             The data used for estimation.
         _ssc_dict : dict
             A dictionary with the sum of squares and cross products matrices.
@@ -1102,7 +1115,7 @@ class Feols(ResultAccessorMixin):
         self._fml = self.FixestFormula.formula
         self._depvar = depvar
         self._Y_untransformed = Y
-        self._data = pd.DataFrame()
+        self._data = nw.from_native(pd.DataFrame())
 
         if store_data:
             self._data = _data
@@ -1441,7 +1454,7 @@ class Feols(ResultAccessorMixin):
         else:
             inference = f"CRV({cluster_list[0]})"
 
-            cluster_array = self._data[cluster_list[0]].to_numpy().flatten()
+            cluster_array = self._data.get_column(cluster_list[0]).to_numpy().flatten()
 
             boot = WildboottestCL(
                 X=_X,
@@ -1597,14 +1610,15 @@ class Feols(ResultAccessorMixin):
         xfml_list = [x for x in xfml_list if x != treatment]
         xfml = "" if not xfml_list else "+".join(xfml_list)
 
-        data = self._data
+        # TODO: narwhalify ccv
+        data_pd = _narwhals_to_pandas(self._data)
         Y = self._Y.flatten()
-        W = data[treatment].to_numpy()
+        W = data_pd[treatment].to_numpy()
         assert np.all(np.isin(W, [0, 1])), (
             "Treatment variable must be binary with values 0 and 1"
         )
         X = self._X
-        cluster_vec = data[cluster].to_numpy()
+        cluster_vec = data_pd[cluster].to_numpy()
         unique_clusters = np.unique(cluster_vec)
 
         tau_full = np.array(self.coef().xs(treatment))
@@ -1623,7 +1637,7 @@ class Feols(ResultAccessorMixin):
                 X=X,
                 W=W,
                 rng=rng,
-                data=data,
+                data=data_pd,
                 treatment=treatment,
                 cluster_vec=cluster_vec,
                 pk=pk,
@@ -1669,7 +1683,7 @@ class Feols(ResultAccessorMixin):
         _ccv = ccv_module._ccv
 
         return _ccv(
-            data=data,
+            data=data_pd,
             depvar=depvar,
             treatment=treatment,
             cluster=cluster,
@@ -1708,8 +1722,9 @@ class Feols(ResultAccessorMixin):
             # if output = "numpy", type of Y, X is not np.ndarray but a formulaic object
             # which cannot be pickled by joblib
 
+            # TODO: narwhalify _model_matrix_one_hot (pass native data to formulaic)
             Y, X = formulaic.Formula(fml_dummies).get_model_matrix(
-                self._data, output=output
+                _narwhals_to_pandas(self._data), output=output
             )
             xnames = X.model_spec.column_names
             Y = Y.toarray().flatten() if output == "sparse" else Y.flatten()
@@ -1868,10 +1883,11 @@ class Feols(ResultAccessorMixin):
             agg_first = combine_covariates is not None
 
         cluster_df: pd.Series | None = None
+        # TODO: narwhalify GelbachDecomposition (accepts narwhals series for cluster_df)
         if cluster is not None:
-            cluster_df = self._data[cluster]
+            cluster_df = _narwhals_to_pandas(self._data)[cluster]
         elif self._is_clustered:
-            cluster_df = self._data[self._clustervar[0]]
+            cluster_df = _narwhals_to_pandas(self._data)[self._clustervar[0]]
         else:
             cluster_df = None
 
@@ -1950,8 +1966,10 @@ class Feols(ResultAccessorMixin):
                 "The fixef() method is currently not supported for IV models."
             )
 
+        # TODO: narwhalify fixef (pass native data to formulaic model_spec)
+        _data_pd = _narwhals_to_pandas(self._data)
         Y, X = self._model_spec["second_stage"].get_model_matrix(
-            self._data,
+            _data_pd,
             output="pandas",
             context=FORMULAIC_TRANSFORMS | {**self._context},
         )
@@ -1971,7 +1989,7 @@ class Feols(ResultAccessorMixin):
             [f"C({fe})" for fe in self.FixestFormula.fixed_effects_wrapped],
             _parser=DefaultFormulaParser(include_intercept=False),
         ).get_model_matrix(
-            self._data,
+            _data_pd,
             output="sparse",
             ensure_full_rank=False,
             context=FORMULAIC_TRANSFORMS,
@@ -2092,6 +2110,7 @@ class Feols(ResultAccessorMixin):
             )
             n_observations = self._N
         else:
+            # TODO: narwhalify predict (pass native data to formulaic model_spec)
             newdata = _narwhals_to_pandas(newdata).reset_index(drop=True)
             n_observations = newdata.shape[0]
             context = FORMULAIC_TRANSFORMS | {**self._context}
@@ -2246,11 +2265,13 @@ class Feols(ResultAccessorMixin):
         if resampvar_ not in self._coefnames:
             raise ValueError(f"{resampvar_} not found in the model's coefficients.")
 
-        if cluster is not None and cluster not in self._data:
+        if cluster is not None and cluster not in self._data.columns:
             raise ValueError(f"The variable {cluster} is not found in the data.")
 
         clustervar_arr = (
-            self._data[cluster].to_numpy().reshape(-1, 1) if cluster else None
+            self._data.get_column(cluster).to_numpy().reshape(-1, 1)
+            if cluster
+            else None
         )
 
         if clustervar_arr is not None and np.any(np.isnan(clustervar_arr)):
@@ -2306,8 +2327,9 @@ class Feols(ResultAccessorMixin):
             if type == "randomization-c":
                 vcov_input = "iid"
 
+            # TODO: narwhalify _get_ritest_stats_slow
             ri_stats = _get_ritest_stats_slow(
-                data=self._data,
+                data=_narwhals_to_pandas(self._data),
                 resampvar=resampvar_,
                 clustervar_arr=clustervar_arr,
                 fml=self._fml,
@@ -2320,10 +2342,15 @@ class Feols(ResultAccessorMixin):
 
         else:
             weights = self._weights.flatten()
+            # TODO: narwhalify _get_ritest_stats_fast (pass narwhals df for fval_df)
             fval_df = (
-                self._data[self._fixef.split("+")] if self._fixef is not None else None
+                _narwhals_to_pandas(self._data)[
+                    [s.strip() for s in self._fixef.split("+")]
+                ]
+                if self._fixef is not None
+                else None
             )
-            D = self._data[resampvar_].to_numpy()
+            D = self._data.get_column(resampvar_).to_numpy()
 
             ri_stats = _get_ritest_stats_fast(
                 Y=self._Y,
@@ -2557,7 +2584,7 @@ def _drop_multicollinear_variables(
 def _check_vcov_input(
     vcov: str | dict[str, str],
     vcov_kwargs: dict[str, Any] | None,
-    data: pd.DataFrame,
+    data: nw.DataFrame,
 ):
     """
     Check the input for the vcov argument in the Feols class.

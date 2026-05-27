@@ -146,12 +146,8 @@ class Quantreg(Feols):
             raise ValueError(f"`method` must be one of {{{valid}}}") from exc
 
     def to_array(self):
-        "Turn estimation DataFrames to np arrays."
-        self._Y, self._X, self._Z = (
-            self._Y.to_numpy(),
-            self._X.to_numpy(),
-            self._X.to_numpy(),
-        )
+        "Ensure estimation arrays are numpy (already set by prepare_model_matrix)."
+        self._Z = self._X
 
     def prepare_model_matrix(self):
         "Prepare model inputs for estimation."

@@ -161,29 +161,36 @@ class FeolsCompressed(Feols):
         super().prepare_model_matrix()
 
         # now run compression algos
-        depvars = self._Y.columns.tolist()
-        covars = self._X.columns.tolist()
+        # self._Y and self._X are numpy arrays after super().prepare_model_matrix();
+        # rebuild DataFrames using the stored column names.
+        depvars = [self._depvar]
+        covars = list(self._coefnames)
+
+        Y_pd = pd.DataFrame(self._Y, columns=depvars)
+        X_pd = pd.DataFrame(self._X, columns=covars)
 
         if polars_installed:
-            Y_nw = nw.from_native(pl.from_pandas(self._Y))
-            X_nw = nw.from_native(pl.from_pandas(self._X))
+            Y_nw = nw.from_native(pl.from_pandas(Y_pd))
+            X_nw = nw.from_native(pl.from_pandas(X_pd))
         else:
             logging.info(
                 "Polars is not installed. Falling back to pandas. You can likely speed up the compression drastically by installing polars."
             )
-            Y_nw = nw.from_native(self._Y)
-            X_nw = nw.from_native(self._X)
+            Y_nw = nw.from_native(Y_pd)
+            X_nw = nw.from_native(X_pd)
 
         fevars = []
         if self._has_fixef:
             self._use_mundlak = True
             self._has_fixef = False
 
-            fevars = self._fe.columns.tolist()
+            assert self._fe_colnames is not None
+            fevars = list(self._fe_colnames)
+            fe_pd = pd.DataFrame(self._fe, columns=fevars)
             if polars_installed:
-                fe_nw = nw.from_native(pl.from_pandas(self._fe))
+                fe_nw = nw.from_native(pl.from_pandas(fe_pd))
             else:
-                fe_nw = nw.from_native(self._fe)
+                fe_nw = nw.from_native(fe_pd)
 
             data_long = nw.concat([Y_nw, X_nw, fe_nw], how="horizontal")
 
@@ -225,19 +232,22 @@ class FeolsCompressed(Feols):
         self._depvar = depvar_string
         self._fml = self._fml.replace(self._depvar, f"mean_{self._depvar}")
 
-        # overwrite Y, X, _data
+        # overwrite Y, X, _data with compressed equivalents
         self._data_long = data_long_mundlak if self._use_mundlak else data_long
         self._Yd = compressed_dict.Y.to_pandas()
-        # store compressed dependent variable before demeaning
-        self._Y_untransformed = self._Yd.copy()
         self._Xd = compressed_dict.X.to_pandas()
         self._fe = compressed_dict.fe.to_pandas()
-        # covars = X.columns
         self._compression_count = compressed_dict.compression_count.to_pandas()
         self._weights = self._compression_count.to_numpy()
         self._Yprime = compressed_dict.Yprime.to_pandas()
         self._Yprimeprime = compressed_dict.Yprimeprime.to_pandas()
-        self._data = compressed_dict.df_compressed.to_pandas()
+
+        # update Y, X numpy arrays to compressed versions so get_fit() uses the right shapes
+        self._Y = self._Yd.to_numpy()
+        self._Y_untransformed = self._Y.copy()
+        self._X = self._Xd.to_numpy()
+
+        self._data = nw.from_native(compressed_dict.df_compressed.to_pandas())
 
     def demean(self):
         "Compression 'handles demeaning' via Mundlak transform."

@@ -3,7 +3,10 @@ from collections.abc import Mapping
 from importlib import import_module
 from typing import Any
 
-import pandas as pd
+import narwhals.stable.v1 as nw
+import numpy as np
+import pandas as pd  # TODO: can we defer this import until we need it?
+from narwhals.stable.v1.typing import IntoDataFrame
 
 from pyfixest.estimation.api.utils import _ALL_SAMPLE, _AllSampleSentinel
 from pyfixest.estimation.formula.parse import Formula
@@ -27,16 +30,17 @@ from pyfixest.estimation.models.fepois_ import Fepois
 from pyfixest.estimation.models.feprobit_ import Feprobit
 from pyfixest.estimation.quantreg.quantreg_ import Quantreg
 from pyfixest.estimation.quantreg.QuantregMulti import QuantregMulti
-from pyfixest.utils.dev_utils import DataFrameType, _narwhals_to_pandas
 from pyfixest.utils.utils import capture_context
 
 
 class FixestMulti:
     """A class to estimate multiple regression models with fixed effects."""
 
+    _data: nw.DataFrame
+
     def __init__(
         self,
-        data: DataFrameType,
+        data: IntoDataFrame,
         copy_data: bool,
         store_data: bool,
         lean: bool,
@@ -58,7 +62,7 @@ class FixestMulti:
 
         Parameters
         ----------
-        data : panda.DataFrame
+        data : IntoDataFrame
             The input DataFrame for the object.
         copy_data : bool
             Whether to copy the data or not.
@@ -126,16 +130,13 @@ class FixestMulti:
         else:
             self._splitvar = None
 
-        # TODO: get rid of this
-        data = _narwhals_to_pandas(data)
-
-        if self._copy_data:
-            self._data = data.copy()
-        else:
-            self._data = data
         # reindex: else, potential errors when pd.DataFrame.dropna()
         # -> drops indices, but formulaic model_matrix starts from 0:N...
-        self._data.reset_index(drop=True, inplace=True)
+        if isinstance(data, pd.DataFrame):
+            data.reset_index(drop=True, inplace=True)
+
+        self._data = nw.from_native(data)
+
         self.all_fitted_models: dict[str, Feols | Fepois | Feiv] = {}
 
         # set functions inherited from other modules
@@ -300,13 +301,9 @@ class FixestMulti:
         all_splits: list[str | int | float | _AllSampleSentinel] = []
         if self._run_full:
             all_splits.append(_ALL_SAMPLE)
-        if self._run_split:
+        if self._run_split and self._splitvar:
             all_splits.extend(
-                self._data[self._splitvar]
-                .dropna()
-                .drop_duplicates()
-                .sort_values()
-                .tolist()
+                self._data.get_column(self._splitvar).drop_nulls().unique().sort()
             )
 
         for sample_split_value in all_splits:
@@ -315,7 +312,7 @@ class FixestMulti:
 
                 # dictionary to cache demeaned data keyed by na_index,
                 # only relevant for `.feols()`
-                lookup_demeaned_data: dict[frozenset[int], pd.DataFrame] = {}
+                lookup_demeaned_data: dict[frozenset[int], dict[str, np.ndarray]] = {}
 
                 for FixestFormula in fixef_key_models:  # type: ignore
                     # loop over both dictfe and dictfe_iv (if the latter is not None)
